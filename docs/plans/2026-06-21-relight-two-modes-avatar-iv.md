@@ -857,3 +857,11 @@ git commit -m "docs(relight): log Avatar IV Sync-mode done-gate"
 - **Bounded the download hardening — no retry loop.** The reviewer floated `requests` + retry. I added a 120s timeout + non-empty validation + a `GuidedError` that surfaces the recoverable `video_url`, but deliberately **did not** build automatic retry/resume — YAGNI for a tool the user re-runs, and the surfaced `video_url` already makes a failed download recoverable without re-paying. If real-world flakiness proves this wrong, retry is a cheap follow-up.
 
 **Plan body changes:** Task 1 Step 4 count; Task 2 hardened upload helpers + `_parse_data`/`_require_under_cap` + 3 tests + Interfaces; Task 3 aspect test; Task 4 assertion fix, Step-4 deletion + renumber, `import requests`, hardened `poll_until_done`/`_download`/`_verify_nonempty`/`run` (stderr, video_id, with_name) + 2 tests + Interfaces; Task 5 concrete advisory preflight; Test Plan adversarial bullet + Self-Review note.
+
+### Round 2 — 2026-06-21
+
+**Reviewer verdict:** APPROVED
+
+**Reviewer summary:** All seven round-1 issues verified resolved against the live tree (test counts 29/≈51 confirmed via `pytest --collect-only`; `requests 2.34.2` installed; single-`ok`-gate preflight convention matches; commits `2e71e8d`/`4f7eeb5` exist; SKILL.md still holds the lip-sync text Task 1 reverts). Both planner deviations (stderr discipline; no auto-retry) explicitly endorsed. Two non-blocking operator notes: the existing import-smoke test will now also cover the new `heygen_*` modules (bonus); sanity-check the `/tmp/sync-gate.mp4` path under Git-Bash before the Task 7 paid run.
+
+**Outcome:** Approved by reviewer at round 2. Plan ready for implementation via superpowers:subagent-driven-development or superpowers:executing-plans.
