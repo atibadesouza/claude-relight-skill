@@ -1,5 +1,5 @@
 """MediaGen: upscale any video via Topaz on Fal (approval-gated)."""
-import argparse, json, sys
+import argparse, json, pathlib, shutil, subprocess, sys
 import falkit as fal
 from falkit import GuidedError
 
@@ -24,11 +24,35 @@ def output_res_tier(in_min_dim, factor) -> str:
     return "4K"
 
 
+def _probe(path):
+    """Return (duration_s, min_dim) via ffprobe, or (None, None) if unavailable."""
+    if shutil.which("ffprobe") is None:
+        return (None, None)
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height:format=duration", "-of", "json", path],
+            capture_output=True, text=True, check=True).stdout
+        meta = json.loads(out)
+        s = meta["streams"][0]
+        return (float(meta["format"]["duration"]), min(int(s["width"]), int(s["height"])))
+    except Exception:
+        return (None, None)
+
+
 def run(video_path, out_path, factor=2, target_fps=None, duration_s=None, in_min_dim=None,
         out_res="1080", tier="best", model=None, dry_run=False, approved=False) -> dict:
     if factor > MAX_FACTOR:
         raise GuidedError(f"Topaz supports up to {MAX_FACTOR}x; got {factor}x.")
     endpoint = fal.resolve_model(TASK, tier=tier, override=model)
+    # Auto-probe duration/short-side when the caller didn't supply them, so the cost
+    # estimate is accurate even on the real run (done-gate fix: est was $0 otherwise).
+    if (duration_s is None or in_min_dim is None) and pathlib.Path(video_path).exists():
+        pd, pm = _probe(video_path)
+        if duration_s is None:
+            duration_s = pd
+        if in_min_dim is None:
+            in_min_dim = pm
     # If we know the input short side, derive the output tier from factor so the
     # estimate scales with factor instead of quoting a flat price.
     eff_res = output_res_tier(in_min_dim, factor) if in_min_dim else out_res

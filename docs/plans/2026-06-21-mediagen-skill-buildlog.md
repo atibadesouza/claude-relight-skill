@@ -27,3 +27,18 @@
 ## Follow-ups
 - **Task 10 (paid done-gate) — left for the user.** Needs the shared `FAL_KEY` in `~/.claude/fal.env`. Run one of each: generate an image (verify Claude rewrites the prompt), edit with a reference (identity preserved), animate a still (cost + approval; >10MB auto-compress), upscale a clip (cost scales with factor + approval). Add a regression test for any defect.
 - Branch `mediagen-skill` is ready to merge once Task 10 passes. Not pushed yet.
+
+## Task 10 — paid done-gate (executed 2026-06-21)
+
+Shared key seeded to `~/.claude/fal.env` from the existing relight `.env` (one key, both skills). All four capabilities run with real Fal calls:
+
+- **Text→image** ($0.15) — golden retriever in a Superman cape playing a Switch in a warm library. Auto-selected `nano-banana-pro`. Excellent.
+- **Image edit w/ reference** ($0.15) — same dog/pose/couch/library/Switch preserved, costume swapped Superman→Hulk. Identity-preserving edit confirmed (`nano-banana-pro/edit`).
+- **Image→video** ($0.50) — animated the still to a 3.04s 1440×1440 clip via `kling-video/v3/pro/image-to-video`; approval gate showed $0.50 before spend.
+- **Upscale** (~$0.24) — `topaz/upscale/video` took 1440²→2880² (true 2×); gate showed $0.24.
+
+**Total ≈ $1.04.**
+
+**Defect found + fixed (done-gate):** the real upscale run reported `est_cost: 0.0` because the post-run estimate relied on `--duration`/`--in-min-dim` being passed (the dry-run got them, the final command didn't). The approval gate was correct ($0.24), but the post-run number was wrong. Fix: `upscale.py` now **auto-probes** duration + short side via ffprobe when not supplied, so the estimate is accurate on the real run too. Regression test `test_run_autoprobes_duration_for_cost` added. Full suite **70 passed**.
+
+**All four capabilities verified. Plan complete (Tasks 1–10).** Branch `mediagen-skill` ready to merge/push.

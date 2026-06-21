@@ -47,3 +47,16 @@ def test_real_run_refuses_without_approval(monkeypatch):
     monkeypatch.setattr(up.fal, "subscribe", lambda *a, **k: {"video": {"url": "x"}})
     with pytest.raises(GuidedError):
         up.run("in.mp4", "out.mp4", dry_run=False, approved=False)
+
+
+def test_run_autoprobes_duration_for_cost(tmp_path, monkeypatch):
+    # Regression (done-gate): real run reported $0 when --duration wasn't passed.
+    # Now it auto-probes, so est reflects real duration/resolution.
+    f = tmp_path / "v.mp4"; f.write_bytes(b"x")
+    monkeypatch.setattr(up, "_probe", lambda p: (5.0, 1440))
+    monkeypatch.setattr(up.fal, "load_fal_key", lambda *a, **k: "k")
+    monkeypatch.setattr(up.fal, "upload_file", lambda p: "u")
+    monkeypatch.setattr(up.fal, "subscribe", lambda *a, **k: {"video": {"url": "x"}})
+    monkeypatch.setattr(up.fal, "download", lambda u, o: o)
+    out = up.run(str(f), "o.mp4", factor=2, approved=True)  # no duration passed
+    assert out["est_cost"] == 0.40  # 1440*2=2880 -> 4K tier; round(0.08*5,2)
