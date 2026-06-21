@@ -57,7 +57,7 @@ Show the resulting still to the user. (This one still is reused for every segmen
 
 Present the still + the dollar estimate. Ask the user to **approve**, or request a rerun (loop back to Step 2 with a tweaked prompt / new reference). Do not proceed without explicit approval.
 
-**Output filename:** name the final file after the **input** with ` Relit` appended before the extension — e.g. `My Clip.mp4` → `My Clip Relit.mp4`. Below, `<out>` = `<output_dir>/<input-stem> Relit.mp4`.
+**Output location + filename:** each job gets its **own subfolder** named after the input stem, and the final file is the input name with ` Relit` appended — e.g. `My Clip.mp4` → `<output_dir>/My Clip/My Clip Relit.mp4`. Keep the approved still in the same subfolder. Below, `<out>` = `<output_dir>/<input-stem>/<input-stem> Relit.mp4` (create the subfolder first).
 
 **Step 4 — on approval, run the paid step (branch on duration):**
 - `duration <= 10`:
@@ -72,7 +72,7 @@ Report the final path. Batch automatically splits → relights each segment with
 
 ## Output
 
-Final MP4 in `<output_dir>`, named `<input-stem> Relit.mp4` (matches the input filename with ` Relit` added). Keep the approved still and source frame alongside it. Intermediate segments live in `<work>` and can be deleted.
+Final MP4 in `<output_dir>/<input-stem>/`, named `<input-stem> Relit.mp4` (matches the input filename with ` Relit` added). Keep the approved still in that same subfolder. Intermediate segments live in `<work>` and can be deleted.
 
 ## Cost transparency
 
