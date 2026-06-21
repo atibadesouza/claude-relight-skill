@@ -113,4 +113,10 @@ def generate_avatar_iv(key: str, payload: dict):
 
 def get_status(key: str, video_id: str) -> dict:
     r = requests.get(f"{API}/v1/video_status.get", headers=headers(key), params={"video_id": video_id})
-    return r.json().get("data", {})
+    if r.status_code >= 400:
+        raise GuidedError(f"HeyGen status check failed (HTTP {r.status_code}): {r.text[:200]}")
+    try:
+        j = r.json()
+    except ValueError:
+        raise GuidedError(f"HeyGen status check returned a non-JSON response (HTTP {r.status_code}).")
+    return (j.get("data") if isinstance(j, dict) else {}) or {}

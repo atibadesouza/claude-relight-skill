@@ -56,3 +56,12 @@ def test_parse_data_credit_error_in_envelope_raises():
     with pytest.raises(rc.GuidedError) as e:
         hc._parse_data(_Resp({"message": "Insufficient credit. This operation requires 'api' credits."}))
     assert "credit" in str(e.value).lower()
+
+
+def test_get_status_raises_guided_on_http_error(monkeypatch):
+    class _R:
+        status_code = 401
+        text = "unauthorized"
+    monkeypatch.setattr(hc.requests, "get", lambda *a, **k: _R())
+    with pytest.raises(rc.GuidedError):
+        hc.get_status("k", "vid")
