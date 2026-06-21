@@ -34,4 +34,19 @@
 4. **Batch real run** — a >10s clip. Verify segment count + total shown before spend; same still across segments; final stitched MP4 plays continuously with audio across seams; no jarring seam jumps.
 5. For any defect found, add a regression test under `tests/` and fix before declaring done.
 
-(Task 11 is intentionally NOT executed in this run — it spends money and needs the user's key, which is a Tier-1 stop.)
+(Task 11 was originally deferred; the user then supplied the key + inputs, so it was executed — see below.)
+
+## Task 11 — real paid run (executed 2026-06-21)
+
+**Inputs:** `Build Projects from Video Tutorials with Claude.mp4` (54.6s screen recording, webcam panel) + a living-room/computers `.avif` reference.
+
+**Findings / deviations:**
+- **Input wasn't a full-frame talking head** — it was a screen recording with the person as a webcam panel. Cropped to the person (x295–985, y162–775) and upscaled to 1218×1080 (>720 min) before relighting. The `.avif` reference was converted to PNG (models don't take AVIF).
+- **Still (Nano Banana Pro): excellent** first try — subject placed in the computer-room with cinematic warm lighting, identity preserved. ~$0.15.
+- **BUG found in video stage:** the original soft `VIDEO_PROMPT` ("apply the environment from the reference") produced **inconsistent backgrounds across segments** — seg0 rendered a plain wall, seg1 rendered the full computer room. Stitching would jump at seams. Stopped the batch at 2/6 (~$3.23 spent) rather than burn the full $9.39.
+- **Fix:** strengthened `VIDEO_PROMPT` to insist on a *full background rebuild every segment*, and added a `--prompt` per-run override (relight_video + relight_batch). Committed with a regression test (`test_prompt_override_used_when_given`); suite now **26 passing**. Verified the strong prompt on one test segment → consistent computer-room background in both early and late frames.
+- **Finish:** re-rendered the remaining 5 segments with the strong scene prompt (reusing the validated test segment as #2) and concatenated all 6. Extra spend ~$7.70; run total ~$12.50 (vs $9.39 estimate — delta = cost of discovering/fixing the background bug). User approved the higher total.
+
+**Skill improvement banked for next time:** the stronger default prompt means a single talking-head clip should get a consistent replaced background first try; `--prompt` allows scene-specific direction.
+
+**Follow-up still open:** a proper full-frame talking-head export would skip the crop step. Consider adding (a) an auto-crop/letterbox-detection helper and (b) AVIF→PNG conversion into the skill so these aren't manual.
