@@ -50,7 +50,7 @@ Use a temp work dir, e.g. `<output_dir>/.work-<name>/`. `<output_dir>` defaults 
 python scripts/extract_frame.py "<video>" --out "<work>/frame.png"
 ```
 Read the JSON. Note `probe.duration`. If `warnings` mention **resolution or size** out of bounds, relay them and STOP (not auto-fixable). Duration is handled by the branch in Step 3/4 — it is not a stop.
-If `probe.duration < 3`, tell the user Kling needs ≥3s and STOP.
+If `probe.duration < 3`: this is a **Motion-mode** limit — Kling needs ≥3s, so in Motion mode tell the user and STOP. In **Sync mode** (Avatar IV) there is no Kling floor, so proceed.
 
 **Step 2 — generate the relit still:**
 ```
@@ -90,7 +90,7 @@ Report the final path. Batch automatically splits → relights each segment with
 ```
 python scripts/heygen_avatar.py "<video>" "<work>/still.png" --out "<out_sync>" --approved
 ```
-`<out_sync>` = `<output_dir>/<input-stem>/<input-stem> Synced.mp4`. This extracts the
+`<out_sync>` = `<output_dir>/<input-stem>/<input-stem> Synced.mp4` (create the `<input-stem>/` subfolder first, the same as Motion mode). This extracts the
 clip's audio, animates the approved still via HeyGen Avatar IV, and downloads the result.
 If it reports an `Insufficient credit` error, tell the user to fund **API** credits at
 the HeyGen dashboard and retry. Report `<out_sync>` as the final result.
