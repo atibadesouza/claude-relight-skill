@@ -57,20 +57,22 @@ Show the resulting still to the user. (This one still is reused for every segmen
 
 Present the still + the dollar estimate. Ask the user to **approve**, or request a rerun (loop back to Step 2 with a tweaked prompt / new reference). Do not proceed without explicit approval.
 
+**Output filename:** name the final file after the **input** with ` Relit` appended before the extension — e.g. `My Clip.mp4` → `My Clip Relit.mp4`. Below, `<out>` = `<output_dir>/<input-stem> Relit.mp4`.
+
 **Step 4 — on approval, run the paid step (branch on duration):**
 - `duration <= 10`:
   ```
-  python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --out "<output_dir>/relit_<name>.mp4" --approved
+  python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --out "<out>" --approved
   ```
 - `duration > 10`:
   ```
-  python scripts/relight_batch.py "<video>" "<work>/still.png" --work "<work>" --out "<output_dir>/relit_<name>.mp4" --approved
+  python scripts/relight_batch.py "<video>" "<work>/still.png" --work "<work>" --out "<out>" --approved
   ```
 Report the final path. Batch automatically splits → relights each segment with the shared still → concatenates.
 
 ## Output
 
-Final MP4 in `<output_dir>`. Keep the approved still and source frame alongside it. Intermediate segments live in `<work>` and can be deleted.
+Final MP4 in `<output_dir>`, named `<input-stem> Relit.mp4` (matches the input filename with ` Relit` added). Keep the approved still and source frame alongside it. Intermediate segments live in `<work>` and can be deleted.
 
 ## Cost transparency
 
