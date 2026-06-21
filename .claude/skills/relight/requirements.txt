@@ -1,3 +1,4 @@
 fal-client>=0.5.0
 opencv-python>=4.9.0
 pytest>=8.0.0
+requests
