@@ -4,7 +4,7 @@
 
 **Goal:** Build the MediaGen Claude Code skill (text→image, image edit w/ references, image→video, video upscale on Fal AI) on top of a new shared `falkit` core that Relight also adopts, with baked-in model auto-selection so the user never names a model.
 
-**Architecture:** A pip-installable `falkit/` package holds the Fal plumbing (`core.py`: key/env, upload, subscribe, cost, GuidedError) and the model registry (`models.py`: task→best-endpoint resolver + cost fns). MediaGen is four thin scripts over `falkit`. Relight's `relight_common.py` becomes a shim re-exporting `falkit` so its 26 tests keep passing. One shared `FAL_KEY` serves both skills.
+**Architecture:** A pip-installable `falkit/` package holds the Fal plumbing (`core.py`: key/env, upload, subscribe, cost, GuidedError) and the model registry (`models.py`: task→best-endpoint resolver + cost fns). MediaGen is four thin scripts over `falkit`. Relight's `relight_common.py` becomes a shim (with a `try/except ImportError` inline fallback) re-exporting `falkit`, so its tests keep passing (26 prior, 2 updated for shared-key precedence + 1 new shim-smoke = 27). One shared `FAL_KEY` serves both skills.
 
 **Tech Stack:** Python 3, pytest, `fal-client`, system `ffmpeg`/`ffprobe` (for the >10MB image compress + any probing), PowerShell installer.
 
@@ -15,7 +15,7 @@
 - **No paid call without** (a) a resolvable key AND (b) for `image_to_video`+`upscale`, explicit `--approved`. `--dry-run` spends nothing on every paid script.
 - **Cost policy:** images run automatically (cheap); video + upscale show estimate + require approval.
 - **Shared key precedence (`falkit.load_fal_key`):** `FAL_KEY` env → `~/.claude/fal.env` → skill-local `.env`. Sets `os.environ["FAL_KEY"]`.
-- **Relight must not regress:** its existing 26 tests stay green after the shim refactor.
+- **Relight must not regress:** its suite stays green after the shim refactor — 27 tests (26 prior, 2 updated for shared-key precedence, 1 new shim-smoke). The shim's `try/except ImportError` fallback keeps Relight working even without `falkit`.
 - **pip import name:** package `fal-client` imports as `fal_client`; our package is `falkit`.
 - Scripts resolve paths relative to the script file, run from any CWD.
 
