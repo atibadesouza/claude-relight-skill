@@ -12,6 +12,54 @@ Inspired by the [Systems by Vic](https://www.youtube.com/watch?v=pZNQwzW_JjM) "R
 automatically split into 3–10s segments, each relit against the **same** approved still
 (so the lighting and background stay consistent), then stitched back into one video.
 
+---
+
+## 👉 First time? Just tell Claude Code to read this file.
+
+Open Claude Code in this folder and say:
+
+> **"Read the README and set up the Relight skill for me."**
+
+Claude will run all the setup below automatically, ask you for your Fal API key, verify the
+environment, and tell you when you're ready to relight your first clip. You don't need to run
+any commands yourself.
+
+---
+
+## For Claude Code — automated setup (run this when asked to read/set up this README)
+
+**You (Claude Code) are responsible for getting this skill fully working. Do these steps in
+order, then confirm readiness. Do not skip the verification.**
+
+1. **Run the installer.** On Windows: `./install.ps1`. It installs ffmpeg (via winget),
+   `pip install`s the Python deps in `.claude/skills/relight/requirements.txt`, symlinks the
+   skill into `~/.claude/skills/relight`, and creates `.env` from `.env.example`.
+   - On macOS/Linux (no `install.ps1`): install ffmpeg (`brew install ffmpeg` /
+     `apt install ffmpeg`), run `pip install -r .claude/skills/relight/requirements.txt`,
+     copy `.claude/skills/relight/.env.example` to `.claude/skills/relight/.env`.
+   - **ffmpeg PATH gotcha:** winget often updates PATH but the current shell won't see it
+     until restarted. If `ffmpeg`/`ffprobe` aren't found right after install, locate the
+     binary (e.g. under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\...\bin`) and
+     prepend that dir to PATH for your commands, or tell the user to restart the shell.
+
+2. **Get the Fal API key from the user.** Ask them to paste their key (from
+   https://fal.ai/dashboard/keys — the models are paid, so they need credit). When they give
+   it to you, **write it into `.claude/skills/relight/.env`** as `FAL_KEY=<their key>` using a
+   file edit — **do not echo the key back into the chat.** Never commit `.env` (it is
+   gitignored). If they'd rather not paste it, tell them to edit that file themselves.
+
+3. **Verify the environment.** Run `python .claude/skills/relight/scripts/preflight.py`.
+   Expect `READY`. If any line shows `[XX]`, fix it (install the missing dep, fix the PATH,
+   or get the key) and re-run until it reports `READY`.
+
+4. **Confirm and hand off.** Tell the user setup is complete and ask for their first job:
+   a video file path, a description of the lighting/background they want, and (optionally) a
+   reference image path. Then follow the skill's `SKILL.md` to run the relight (including the
+   cost-approval gate before any paid step).
+
+> The actual relight workflow lives in `.claude/skills/relight/SKILL.md` — that's your
+> orchestration guide once setup is done.
+
 ## How it works
 
 1. **Sharpest frame** — samples the clip and picks the clearest, non-blurry frame.
