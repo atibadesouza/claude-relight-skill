@@ -18,11 +18,12 @@ automatically split into 3–10s segments, each relit against the **same** appro
 
 Open Claude Code in this folder and say:
 
-> **"Read the README and set up the Relight skill for me."**
+> **"Read the README and set up these skills for me."**
 
 Claude will run all the setup below automatically, ask you for your Fal API key, verify the
-environment, and tell you when you're ready to relight your first clip. You don't need to run
-any commands yourself.
+environment, and tell you when you're ready. This repo ships **two** skills — **Relight**
+(talking-head video relighting) and **MediaGen** (image/video generation) — and the setup
+installs both. You don't need to run any commands yourself.
 
 ---
 
@@ -31,12 +32,18 @@ any commands yourself.
 **You (Claude Code) are responsible for getting this skill fully working. Do these steps in
 order, then confirm readiness. Do not skip the verification.**
 
-1. **Run the installer.** On Windows: `./install.ps1`. It installs ffmpeg (via winget),
-   `pip install`s the Python deps in `.claude/skills/relight/requirements.txt`, symlinks the
-   skill into `~/.claude/skills/relight`, and creates `.env` from `.env.example`.
+This repo ships **two** skills — **Relight** and **MediaGen** — on a shared Fal core
+(`falkit`) and **one shared key**. `install.ps1` sets up both at once.
+
+1. **Run the installer.** On Windows: `./install.ps1`. It installs ffmpeg (via winget), the
+   editable shared core (`pip install -e ./falkit-core`), both skills' Python deps, symlinks
+   `~/.claude/skills/relight` and `~/.claude/skills/mediagen`, seeds the shared key file
+   `~/.claude/fal.env`, and verifies `import falkit` succeeds.
    - On macOS/Linux (no `install.ps1`): install ffmpeg (`brew install ffmpeg` /
-     `apt install ffmpeg`), run `pip install -r .claude/skills/relight/requirements.txt`,
-     copy `.claude/skills/relight/.env.example` to `.claude/skills/relight/.env`.
+     `apt install ffmpeg`), `pip install -e ./falkit-core`, then
+     `pip install -r .claude/skills/mediagen/requirements.txt` and
+     `-r .claude/skills/relight/requirements.txt`, and copy `fal.env.example` to
+     `~/.claude/fal.env`.
    - **ffmpeg PATH gotcha:** winget often updates PATH but the current shell won't see it
      until restarted. If `ffmpeg`/`ffprobe` aren't found right after install, locate the
      binary (e.g. under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\...\bin`) and
@@ -44,21 +51,22 @@ order, then confirm readiness. Do not skip the verification.**
 
 2. **Get the Fal API key from the user.** Ask them to paste their key (from
    https://fal.ai/dashboard/keys — the models are paid, so they need credit). When they give
-   it to you, **write it into `.claude/skills/relight/.env`** as `FAL_KEY=<their key>` using a
-   file edit — **do not echo the key back into the chat.** Never commit `.env` (it is
-   gitignored). If they'd rather not paste it, tell them to edit that file themselves.
+   it to you, **write it into `~/.claude/fal.env`** as `FAL_KEY=<their key>` using a file edit
+   — **do not echo the key back into the chat.** This one key serves BOTH skills. Never commit
+   it (it is gitignored). If they'd rather not paste it, tell them to edit that file themselves.
 
 3. **Verify the environment.** Run `python .claude/skills/relight/scripts/preflight.py`.
    Expect `READY`. If any line shows `[XX]`, fix it (install the missing dep, fix the PATH,
-   or get the key) and re-run until it reports `READY`.
+   or get the key) and re-run until it reports `READY`. (This also confirms the shared key
+   resolves, which both skills use.)
 
-4. **Confirm and hand off.** Tell the user setup is complete and ask for their first job:
-   a video file path, a description of the lighting/background they want, and (optionally) a
-   reference image path. Then follow the skill's `SKILL.md` to run the relight (including the
-   cost-approval gate before any paid step).
+4. **Confirm and hand off.** Tell the user setup is complete and ask what they want to do —
+   **Relight** a talking-head video, or use **MediaGen** to generate/edit an image, animate a
+   still, or upscale a video. Then follow that skill's `SKILL.md` (each has its own cost
+   approval gates before any paid step).
 
-> The actual relight workflow lives in `.claude/skills/relight/SKILL.md` — that's your
-> orchestration guide once setup is done.
+> Orchestration guides: `.claude/skills/relight/SKILL.md` and
+> `.claude/skills/mediagen/SKILL.md`. The shared Fal plumbing lives in `falkit-core/`.
 
 ## How it works
 
