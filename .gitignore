@@ -1,5 +1,10 @@
 .env
+fal.env
 relight-outputs/
+mediagen-outputs/
 __pycache__/
 *.pyc
 desktop.ini
+*.egg-info/
+falkit-core/build/
+__editable__.*
