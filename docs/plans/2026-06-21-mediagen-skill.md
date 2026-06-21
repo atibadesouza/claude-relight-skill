@@ -4,7 +4,7 @@
 
 **Goal:** Build the MediaGen Claude Code skill (text→image, image edit w/ references, image→video, video upscale on Fal AI) on top of a new shared `falkit` core that Relight also adopts, with baked-in model auto-selection so the user never names a model.
 
-**Architecture:** A pip-installable `falkit/` package holds the Fal plumbing (`core.py`: key/env, upload, subscribe, cost, GuidedError) and the model registry (`models.py`: task→best-endpoint resolver + cost fns). MediaGen is four thin scripts over `falkit`. Relight's `relight_common.py` becomes a shim (with a `try/except ImportError` inline fallback) re-exporting `falkit`, so its tests keep passing (26 prior, 2 updated for shared-key precedence + 1 new shim-smoke = 27). One shared `FAL_KEY` serves both skills.
+**Architecture:** A pip-installable `falkit/` package holds the Fal plumbing (`core.py`: key/env, upload, subscribe, cost, GuidedError) and the model registry (`models.py`: task→best-endpoint resolver + cost fns). MediaGen is four thin scripts over `falkit`. Relight's `relight_common.py` becomes a shim (with a `try/except ImportError` inline fallback) re-exporting `falkit`, so its suite stays at 0 failed (40 existing on this branch, 2 edited for shared-key precedence, + 3 appended smoke/fallback tests). One shared `FAL_KEY` serves both skills.
 
 **Tech Stack:** Python 3, pytest, `fal-client`, system `ffmpeg`/`ffprobe` (for the >10MB image compress + any probing), PowerShell installer.
 
@@ -15,7 +15,7 @@
 - **No paid call without** (a) a resolvable key AND (b) for `image_to_video`+`upscale`, explicit `--approved`. `--dry-run` spends nothing on every paid script.
 - **Cost policy:** images run automatically (cheap); video + upscale show estimate + require approval.
 - **Shared key precedence (`falkit.load_fal_key`):** `FAL_KEY` env → `~/.claude/fal.env` → skill-local `.env`. Sets `os.environ["FAL_KEY"]`.
-- **Relight must not regress:** its suite stays green after the shim refactor — 27 tests (26 prior, 2 updated for shared-key precedence, 1 new shim-smoke). The shim's `try/except ImportError` fallback keeps Relight working even without `falkit`.
+- **Relight must not regress:** its suite stays at **0 failed** after the shim refactor. Counts are re-baselined from `pytest --co -q` (the relight suite is growing — it now has a lip-sync stage); as of this branch that's 40 existing + 3 appended. The shim's `try/except ImportError` fallback keeps Relight working even without `falkit`.
 - **pip import name:** package `fal-client` imports as `fal_client`; our package is `falkit`.
 - Scripts resolve paths relative to the script file, run from any CWD.
 
@@ -459,19 +459,42 @@ def test_load_fal_key_present(tmp_path, monkeypatch):
 ```
 (Guard for the fallback path: if `import falkit.core` fails because falkit isn't installed, skip the `shared_key_path` patch — wrap it `try/except ImportError`. In our environment falkit IS installed from Task 2, so the falkit path is active and the patch applies.)
 
-- [ ] **Step 3: Add a shim-smoke test**
+- [ ] **Step 3: Add an import-smoke over ALL relight scripts + a real fallback-branch test**
 
-Append to `test_common.py` a test that the shim exposes its public API the way relight scripts import it (round-1 blast-radius mitigation):
+Append to `test_common.py`. The import-smoke catches a shim break in ANY relight script — including `preflight.py` and `lipsync_video.py`, which import `relight_common` but otherwise sit outside the unit gate (round-2 issue 2). The fallback test forces `falkit` unimportable so the `except ImportError` branch (the round-1 graceful-degradation fix) is actually executed — it has no coverage otherwise:
 ```python
+import subprocess
+
 def test_shim_exposes_public_api():
     for name in ("GuidedError", "load_fal_key", "estimate_image_cost", "estimate_video_cost", "find_skill_root"):
         assert hasattr(rc, name)
+
+def test_all_relight_scripts_import():
+    scripts = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    mods = [p.stem for p in scripts.glob("*.py") if p.stem != "__init__"]
+    code = (f"import sys; sys.path.insert(0, r'{scripts}');"
+            + "".join(f"import {m};" for m in mods) + "print('IMPORTS_OK')")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert "IMPORTS_OK" in out.stdout, out.stderr
+
+def test_fallback_runs_without_falkit():
+    # Force `import falkit` to fail, then prove the inline fallback still works.
+    scripts = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    code = ("import sys; sys.modules['falkit']=None;"
+            f"sys.path.insert(0, r'{scripts}');"
+            "import relight_common as rc;"
+            "assert rc.estimate_image_cost('4K')==0.30;"
+            "assert hasattr(rc,'load_fal_key');"
+            "print('FALLBACK_OK')")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert "FALLBACK_OK" in out.stdout, out.stderr
 ```
+(`import sys` and `import pytest`/`import os` are already at the top of `test_common.py`; add `import subprocess` if absent.)
 
 - [ ] **Step 4: Run the full Relight suite**
 
 Run: `python -m pytest .claude/skills/relight/tests/ -v`
-Expected: 27 passed (26 prior, 2 updated + 1 new shim-smoke = the prior 26 with 2 modified, plus 1 added = 27). Update the global count accordingly (Test Plan reflects 27 relight + 14 mediagen + 9 falkit = 50).
+Expected: **0 failed.** Collected count on this branch is **43** (40 existing — 2 edited in place for shared-key precedence — plus the 3 appended tests above). The relight suite grows as that skill evolves (it now includes a lip-sync stage), so **the gate is "0 failed," and the count is re-baselined from `pytest --co -q`, never hardcoded as a pass condition.**
 
 - [ ] **Step 5: Commit**
 
@@ -1170,17 +1193,17 @@ git commit -m "feat(mediagen): installer (falkit editable, mediagen link, shared
 
 ## Test Plan
 
-- **Smoke test:** `python -m pytest falkit/tests/ .claude/skills/mediagen/tests/ .claude/skills/relight/tests/ -q` → **53 passed** (9 falkit + 17 mediagen + 27 relight), no paid calls. Pass signal: all green, including the relight regression after the shim refactor (relight = 26 prior with 2 updated for shared-key precedence + 1 new shim-smoke test).
+- **Smoke test:** `python -m pytest falkit/tests/ .claude/skills/mediagen/tests/ .claude/skills/relight/tests/ -q` → **0 failed**, no paid calls. **Pass signal is "0 failed," not a fixed integer** — the relight suite is actively growing (it now includes a lip-sync stage), so re-baseline the count with `pytest --co -q` rather than asserting a magic number. As of this branch the collected total is **≈69** (9 falkit + 17 mediagen + 43 relight). The relight portion = 40 existing (2 edited for shared-key precedence) + 3 appended (public-API smoke, import-smoke over all scripts, fallback-without-falkit).
 - **Model-resolver tests:** task→endpoint for all four tasks; `tier="cheap"` differs for video; `override` wins; unknown task raises `GuidedError` listing valid tasks. This is the core of the "user never names a model" guarantee.
 - **Payload-builder tests:** each `build_request` carries the resolved endpoint's required params (prompt; edit ref-image list; video duration string + 3–15s bound; upscale factor).
 - **Cost-estimator tests:** `estimate_cost` returns expected values at known inputs (image 2K/4K; video per-second; upscale per-second by out-res), deterministic, no half-cent ambiguity.
 - **Cost-safety / approval (the money guard):** every paid script spends nothing on `--dry-run`; `image_to_video` and `upscale` refuse the real run without `approved=True`; the dry-run guards assert `subscribe`/`load_fal_key`/`upload_file` are never called.
 - **>10MB compression:** `needs_compression` true/false at the boundary (unit, no paid call); the compress path is exercised in the manual gate.
-- **Relight regression:** the relight suite stays green after `relight_common.py` becomes a falkit shim — 27 tests (26 prior, with 2 `load_fal_key` tests updated to isolate `FAL_KEY`/`shared_key_path` for the new shared-key precedence, plus 1 new shim-smoke test). Proves the shared-core refactor didn't break the shipped skill. The shim's `try/except ImportError` fallback is what keeps Relight working even if `falkit` isn't installed.
+- **Relight regression:** the relight suite stays at **0 failed** after `relight_common.py` becomes a falkit shim — 40 existing tests (2 `load_fal_key` tests updated to isolate `FAL_KEY`/`shared_key_path` for shared-key precedence) + 3 appended (public-API smoke; import-smoke that imports ALL relight scripts incl. `preflight.py`/`lipsync_video.py` so a shim break anywhere is caught; a subprocess test that forces `falkit` unimportable and proves the inline fallback runs). Proves the shared-core refactor didn't break the shipped skill, the fallback branch actually works, and no importer is left outside the gate.
 - **Abuse / edge:** missing key → `GuidedError` naming `~/.claude/fal.env`; unknown task/model → `GuidedError`; image_edit with zero references → `GuidedError`; video duration out of 3–15 → `GuidedError` before any call.
 - **AI-output quality (manual done-gate, Task 10):** one real run of each capability judged on output quality + correct cost-gating, not just HTTP 200.
 - **Known-bug regressions:** each defect from Task 10 gets a unit test.
-- **Done-gate:** full unit suite (53) green + relight regression green + cost-safety green + one human-reviewed real run of all four capabilities (with approval gates firing on video/upscale) before merging the branch.
+- **Done-gate:** full unit suite **0 failed** (≈69 collected on this branch; re-baseline via `pytest --co -q`) + relight regression 0 failed + cost-safety green + one human-reviewed real run of all four capabilities (with approval gates firing on video/upscale) before merging the branch.
 
 ## Review log
 
@@ -1205,3 +1228,20 @@ git commit -m "feat(mediagen): installer (falkit editable, mediagen link, shared
 **Contested:** none — the review was correct on every point. (Issue 2's fix is stronger than the reviewer's suggested "document editable install as required": the `try/except` fallback means Relight genuinely still runs standalone, not just that the requirement is documented.)
 
 **Plan body changes:** pyproject 3.10; Task 3 shim+tests rewritten (graceful fallback, 2 tests updated, 1 added); Task 4 requirements note; Task 5/6/7 uniform money-guard; Task 6 unique temp name; Task 7 factor-aware cost + cap + tests; Task 8 SKILL.md cost-approx + upscale probing; Task 9 installer order + import verify + relight reqs + gitignore; test counts 49→53 (9 falkit + 17 mediagen + 27 relight).
+
+### Round 2 — 2026-06-21
+
+**Reviewer verdict:** CHANGES REQUIRED
+
+**Reviewer summary:**
+- Confirmed round-1 issues 1–4 + all blindspots are genuinely fixed.
+- New Issue 1: the "26 prior relight tests" baseline is wrong — the real suite is 40 (`pytest --co`), so every total drifts and the "53 passed" pass-signal is unattainable (real ≈67/69).
+- New Issue 2: the round-1 `except ImportError` fallback has zero test coverage; `preflight.py` (and `lipsync_video.py`) import `relight_common` but sit outside the pytest gate, so a shim break there is invisible.
+
+**Accepted:**
+- Issue 1 — verified the true relight count myself (`pytest --co` → 40; a `test_lipsync_video.py` was added as the skill gained a lip-sync stage). Re-baselined all counts (relight 40 + 3 appended = 43; total ≈69) AND changed the pass signal from a magic integer to **"0 failed," with counts re-baselined via `pytest --co -q`** so this can't drift again.
+- Issue 2 — Task 3 now adds (a) an import-smoke that imports ALL relight scripts (covers `preflight.py`/`lipsync_video.py`) and (b) a subprocess test that forces `falkit` unimportable and asserts the inline fallback runs. The fallback branch is now actually executed under test.
+
+**Contested:** none on substance. One framing note (not a reversal): the count drift was partly because the relight suite changed *underneath* this plan (the user added a lip-sync stage mid-stream), not purely a planning miscount — which is exactly why the fix is to assert "0 failed" + re-baseline dynamically rather than chase a moving integer.
+
+**Plan body changes:** Task 3 Step 3 expanded (import-smoke-all-scripts + fallback-without-falkit tests); Step 4 gate → "0 failed", count 43; Test Plan smoke + relight-regression + done-gate re-baselined to "0 failed / ≈69, re-baseline via pytest --co"; header + constraints counts corrected (no more hardcoded 26/27).
