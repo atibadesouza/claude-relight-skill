@@ -21,7 +21,8 @@ Clips **≤10s** run in one pass. Clips **>10s** are automatically even-split in
 
 1. From the repo root, run `install.ps1` (installs ffmpeg via winget, installs Python deps, symlinks this skill into `~/.claude/skills`, seeds `.env`).
 2. Open `<skill>/.env` and paste your Fal key: `FAL_KEY=...` (get one at https://fal.ai/dashboard/keys, add credit). **Edit the file directly — never paste the key into chat.**
-3. Verify: `python scripts/preflight.py` → expect `READY`.
+3. **Sync mode only:** copy `heygen.env.example` to `~/.claude/heygen.env` and paste your HeyGen API key. **Edit the file directly — never paste the key into chat.**
+4. Verify: `python scripts/preflight.py` → expect `READY`.
 
 `<skill>` = this skill's folder. Scripts are under `<skill>/scripts/`.
 
@@ -30,6 +31,15 @@ Clips **≤10s** run in one pass. Clips **>10s** are automatically even-split in
 - **Video file path** (any length). On Windows, have them right-click the file → "Copy as path".
 - **A description** of the lighting/background they want (e.g. "three-point lighting with neon streamer lights behind me").
 - **Optional reference image path** (a photo of the look they're going for).
+
+## Mode selection (ask first)
+
+Ask the user which mode they want — it changes the video engine:
+
+- **Motion mode (Kling)** — keeps your real head motion, gestures, and audio; lips can drift slightly; ~$10/min. (Steps 1–4 below.)
+- **Sync mode (Avatar IV)** — perfect lip-sync; motion is AI-generated from the relit still; ~$4/min; needs a funded HeyGen key. (Steps 1–3, then the Sync step.)
+
+Both modes share Steps 1–3 (frame → relit still → approval). They differ only at the video step.
 
 ## Run order
 
@@ -49,11 +59,17 @@ python scripts/relight_image.py "<work>/frame.png" "<user description>" [--refer
 Show the resulting still to the user. (This one still is reused for every segment in batch mode.)
 
 **Step 3 — approval gate (always show cost before spending):**
+
+For **Motion mode**:
 - If `duration <= 10`: get the figure from
   `python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --dry-run`
 - If `duration > 10`: get the figure from
   `python scripts/relight_batch.py "<video>" "<work>/still.png" --dry-run`
   → report `est_cost.total` AND the segment count (e.g. "23s → 3 segments → ~$2.49 total").
+
+For **Sync mode**: get the estimate from
+`python scripts/heygen_avatar.py "<video>" "<work>/still.png" --dry-run`
+→ present that figure (~$4/min) instead of the Kling figure.
 
 Present the still + the dollar estimate. Ask the user to **approve**, or request a rerun (loop back to Step 2 with a tweaked prompt / new reference). Do not proceed without explicit approval.
 
@@ -70,9 +86,22 @@ Present the still + the dollar estimate. Ask the user to **approve**, or request
   ```
 Report the final path. Batch automatically splits → relights each segment with the shared still → concatenates.
 
+**Step 4S — Sync mode video (Avatar IV).** Instead of Step 4, on approval run:
+```
+python scripts/heygen_avatar.py "<video>" "<work>/still.png" --out "<out_sync>" --approved
+```
+`<out_sync>` = `<output_dir>/<input-stem>/<input-stem> Synced.mp4`. This extracts the
+clip's audio, animates the approved still via HeyGen Avatar IV, and downloads the result.
+If it reports an `Insufficient credit` error, tell the user to fund **API** credits at
+the HeyGen dashboard and retry. Report `<out_sync>` as the final result.
+
 ## Output
 
-Final MP4 in `<output_dir>/<input-stem>/`, named `<input-stem> Relit.mp4` (matches the input filename with ` Relit` added). Keep the approved still in that same subfolder. Intermediate segments live in `<work>` and can be deleted.
+Final MP4 in `<output_dir>/<input-stem>/`. The filename depends on the mode:
+- **Motion mode:** `<input-stem> Relit.mp4` (matches the input filename with ` Relit` added).
+- **Sync mode:** `<input-stem> Synced.mp4` (matches the input filename with ` Synced` added).
+
+Keep the approved still in that same subfolder. Intermediate segments live in `<work>` and can be deleted.
 
 ## Cost transparency
 
