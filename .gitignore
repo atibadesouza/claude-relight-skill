@@ -1,0 +1,5 @@
+.env
+relight-outputs/
+__pycache__/
+*.pyc
+desktop.ini
