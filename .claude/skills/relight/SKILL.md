@@ -55,37 +55,28 @@ Show the resulting still to the user. (This one still is reused for every segmen
   `python scripts/relight_batch.py "<video>" "<work>/still.png" --dry-run`
   → report `est_cost.total` AND the segment count (e.g. "23s → 3 segments → ~$2.49 total").
 
-Then add the **lip-sync** estimate (Step 5 always runs) to the figure:
-`python scripts/lipsync_video.py "<video>" --dry-run` → take `est_cost`.
-
-Present the still + the **combined** dollar estimate — relight + lip-sync = total (e.g. "23s → 3 segments ≈ $2.49 relight + ~$1.15 sync = ~$3.64 total"). Ask the user to **approve**, or request a rerun (loop back to Step 2 with a tweaked prompt / new reference). One approval covers the whole job. Do not proceed without explicit approval.
+Present the still + the dollar estimate. Ask the user to **approve**, or request a rerun (loop back to Step 2 with a tweaked prompt / new reference). Do not proceed without explicit approval.
 
 **Output location + filename:** each job gets its **own subfolder** named after the input stem, and the final file is the input name with ` Relit` appended — e.g. `My Clip.mp4` → `<output_dir>/My Clip/My Clip Relit.mp4`. Keep the approved still in the same subfolder. Below, `<out>` = `<output_dir>/<input-stem>/<input-stem> Relit.mp4` (create the subfolder first).
 
-**Step 4 — on approval, run the relight (branch on duration).** Writes the relit (but not-yet-synced) video to the work dir as `<work>/relit.mp4` — Step 5 produces the final file, so do **not** report this path:
+**Step 4 — on approval, run the paid step (branch on duration):**
 - `duration <= 10`:
   ```
-  python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --out "<work>/relit.mp4" --approved
+  python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --out "<out>" --approved
   ```
 - `duration > 10`:
   ```
-  python scripts/relight_batch.py "<video>" "<work>/still.png" --work "<work>" --out "<work>/relit.mp4" --approved
+  python scripts/relight_batch.py "<video>" "<work>/still.png" --work "<work>" --out "<out>" --approved
   ```
-Batch automatically splits → relights each segment with the shared still → concatenates.
-
-**Step 5 — fix lip-sync (always runs).** Kling v2v leaves the mouth out of sync with the words; this final stage re-syncs it. Run it automatically on the relit intermediate — no opt-in (cost was already approved in Step 3):
-```
-python scripts/lipsync_video.py "<work>/relit.mp4" --out "<out>" --approved
-```
-The script extracts the relit video's own audio and syncs the mouth to it via Fal sync-lipsync v2 (`best`); nothing else in the frame changes. **Report `<out>` as the final result.**
+Report the final path. Batch automatically splits → relights each segment with the shared still → concatenates.
 
 ## Output
 
-Final MP4 in `<output_dir>/<input-stem>/`, named `<input-stem> Relit.mp4` — relit **and lip-synced**. Keep the approved still in that same subfolder. The pre-sync relit video (`<work>/relit.mp4`) and any intermediate segments live in `<work>` and can be deleted.
+Final MP4 in `<output_dir>/<input-stem>/`, named `<input-stem> Relit.mp4` (matches the input filename with ` Relit` added). Keep the approved still in that same subfolder. Intermediate segments live in `<work>` and can be deleted.
 
 ## Cost transparency
 
-Always state the dollar estimate before the paid step. For batch, state the segment count and total. Never run a paid step without explicit user approval. Rough pricing: still ≈ $0.15 (2K); video ≈ $0.17/sec (e.g. a 4.5s clip ≈ $0.76; a 24s clip ≈ 3 segments ≈ ~$4). Lip-sync (always runs as the final stage): sync-lipsync v2 ≈ $3/min (e.g. a 24s clip ≈ $1.20) — its estimate is folded into the **single** Step 3 approval, so the user approves relight + sync together.
+Always state the dollar estimate before the paid step. For batch, state the segment count and total. Never run a paid step without explicit user approval. Rough pricing: still ≈ $0.15 (2K); video ≈ $0.17/sec (e.g. a 4.5s clip ≈ $0.76; a 24s clip ≈ 3 segments ≈ ~$4).
 
 ## Error handling
 
@@ -98,4 +89,3 @@ Always state the dollar estimate before the paid step. For batch, state the segm
 
 - Each Kling call is one 3–10s segment. ≤10s = one call; >10s = automatic even-split + concat; <3s = rejected (relay the 3s floor and stop).
 - Video must be 720–2160px and ≤200MB per Kling O1.
-- Every relight job ends with a **mandatory** lip-sync stage (Fal sync-lipsync v2, `best`) on the relit footage, re-syncing the mouth to the clip's own audio. It is not optional and not separately approved — its cost is included in the Step 3 total. The relit-but-unsynced `<work>/relit.mp4` is an intermediate, never the deliverable.

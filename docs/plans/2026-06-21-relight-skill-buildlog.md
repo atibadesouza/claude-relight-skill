@@ -50,13 +50,3 @@
 **Skill improvement banked for next time:** the stronger default prompt means a single talking-head clip should get a consistent replaced background first try; `--prompt` allows scene-specific direction.
 
 **Follow-up still open:** a proper full-frame talking-head export would skip the crop step. Consider adding (a) an auto-crop/letterbox-detection helper and (b) AVIF→PNG conversion into the skill so these aren't manual.
-
-## Lip-sync stage — paid done-gate (2026-06-21)
-
-**Plan:** `docs/plans/2026-06-21-relight-lipsync.md`. Added a mandatory final lip-sync stage (Fal `sync-lipsync v2`, `best`) via `scripts/lipsync_video.py`. 14 new unit tests; full suite 40 green.
-
-**Real run (paid):**
-- Input: `relight-outputs/Build Projects from Video Tutorials with Claude/Build Projects from Video Tutorials with Claude Relit.mp4` (54.29s, 1440×1440).
-- Output: `…Relit (lip-synced).mp4` — 54.30s, 1440×1440 h264 + aac, 63.6 MB.
-- **Cost: $2.71** (≈ $3/min × 54.3s), shown before the `--approved` call.
-- Mechanical verification: duration matched (no drift/truncation), resolution unchanged, audio preserved. **Visual mouth-match quality: pending user eyeball.**
