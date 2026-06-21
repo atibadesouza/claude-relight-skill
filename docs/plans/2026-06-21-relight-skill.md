@@ -4,13 +4,13 @@
 
 **Goal:** Build a shareable Claude Code skill, "Relight," that relights short talking-head footage via Fal AI (Nano Banana Pro still → Kling O1 video-to-video reference), reproducing the Systems by Vic workflow.
 
-**Architecture:** Four focused Python scripts (`preflight`, `extract_frame`, `relight_image`, `relight_video`) sharing one helper module (`relight_common`). `SKILL.md` orchestrates them, including the human approval gate. An `install.ps1` symlinks the canonical repo skill into `~/.claude/skills/` and installs system + Python deps. Pure logic (sharpness, validation, cost, prompt/payload building) is unit-tested; paid Fal calls are exercised via `--dry-run`; one real end-to-end run is the manual done-gate.
+**Architecture:** Focused Python scripts sharing one helper module (`relight_common`): `preflight`, `extract_frame`, `relight_image`, `relight_video` (single ≤10s clip), plus batch trio `split_video` / `concat_video` / `relight_batch` for footage >10s. `SKILL.md` orchestrates them, including the human approval gate. Batch mode generates ONE relit still from the whole video and reuses it across all segments for cross-seam consistency, then concatenates. An `install.ps1` symlinks the canonical repo skill into `~/.claude/skills/` and installs system + Python deps. Pure logic (sharpness, validation, cost, segment planning, concat-list building, prompt/payload building) is unit-tested; paid Fal calls are exercised via `--dry-run`; one real end-to-end run is the manual done-gate.
 
 **Tech Stack:** Python 3, pytest, `fal-client`, `opencv-python`, system `ffmpeg`/`ffprobe` (via winget), PowerShell (install).
 
 ## Global Constraints
 
-- **Kling O1 input limits (verbatim):** video 3–10 seconds, 720–2160px, ≤200MB. Reject/trim outside this; never silently truncate.
+- **Kling O1 input limits (verbatim):** video 3–10 seconds (3s floor AND 10s ceiling), 720–2160px, ≤200MB. Resolution/size outside → stop. Duration >10s → batch mode (even-split into 3–10s segments); duration <3s → stop. Never silently truncate.
 - **Fal is paid.** No script makes a paid Fal call without (a) a valid `FAL_KEY` and (b) for the video step, explicit user approval. `--dry-run` must spend nothing.
 - **Secrets:** `FAL_KEY` only ever read from the skill's local `.env` (gitignored). Never printed, never pasted in chat.
 - **Canonical source of truth:** `.claude/skills/relight/` in the repo. User-level copy is a symlink created by `install.ps1` — never edited directly.
@@ -32,12 +32,18 @@
 │  ├─ preflight.py              verify ffmpeg/ffprobe + deps + FAL_KEY
 │  ├─ extract_frame.py          probe, validate, sharpness, best-frame selection
 │  ├─ relight_image.py          build image request, dry-run, run via Fal
-│  └─ relight_video.py          build video request, dry-run, run via Fal
+│  ├─ relight_video.py          build video request, dry-run, run via Fal (one ≤10s clip)
+│  ├─ split_video.py            plan_segments + ffmpeg even-split into ≤10s parts
+│  ├─ concat_video.py           build_concat_list + ffmpeg concat to single mp4
+│  └─ relight_batch.py          orchestrate split → relight each (shared still) → concat
 └─ tests/
    ├─ test_common.py
    ├─ test_extract_frame.py
    ├─ test_relight_image.py
-   └─ test_relight_video.py
+   ├─ test_relight_video.py
+   ├─ test_split_video.py
+   ├─ test_concat_video.py
+   └─ test_relight_batch.py
 install.ps1                     symlink skill to ~/.claude/skills; install deps; seed .env
 README.md                       setup, Fal key, cost, usage, 10s constraint
 ```
@@ -675,7 +681,400 @@ git commit -m "feat(relight): Kling O1 video relight with approval gate + dry-ru
 
 ---
 
-### Task 5: Preflight check (`preflight.py`)
+### Task 5: Segment planning + split (`split_video.py`)
+
+**Files:**
+- Create: `.claude/skills/relight/scripts/split_video.py`
+- Test: `.claude/skills/relight/tests/test_split_video.py`
+
+**Interfaces:**
+- Consumes: `relight_common.GuidedError`.
+- Produces:
+  - `plan_segments(duration: float, max_len=10.0, min_len=3.0) -> list[tuple[float, float]]` — `[(start, length), ...]` covering `[0, duration]`. `ceil(duration/max_len)` segments of equal length; every length lands in `[min_len, max_len]` (even-split avoids the invalid <3s tail that naive 10s cuts produce).
+  - `split_video(path: str, work_dir: str, segments: list[tuple[float,float]]) -> list[str]` — writes `seg_000.mp4 …` (re-encoded) via ffmpeg, returns the ordered paths. Raises `GuidedError` if ffmpeg missing.
+
+- [ ] **Step 1: Write the failing tests**
+
+`.claude/skills/relight/tests/test_split_video.py`:
+```python
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+import split_video as sv
+
+
+def test_short_clip_is_single_segment():
+    assert sv.plan_segments(5.0) == [(0.0, 5.0)]
+    assert sv.plan_segments(10.0) == [(0.0, 10.0)]   # exactly 10s stays single
+
+
+def test_long_clip_even_split_in_bounds():
+    segs = sv.plan_segments(21.0)
+    assert len(segs) == 3                              # ceil(21/10)
+    assert all(3.0 <= length <= 10.0 for _, length in segs)
+    assert abs(sum(length for _, length in segs) - 21.0) < 0.01
+
+
+def test_avoids_invalid_short_tail():
+    # naive 10s cuts -> 10+10+1 (1s tail rejected by Kling). Even-split must not.
+    assert all(length >= 3.0 for _, length in sv.plan_segments(21.0))
+
+
+def test_just_over_limit_two_segments():
+    segs = sv.plan_segments(10.1)
+    assert len(segs) == 2
+    assert all(3.0 <= length <= 10.0 for _, length in segs)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest .claude/skills/relight/tests/test_split_video.py -v`
+Expected: FAIL — `ModuleNotFoundError: split_video`.
+
+- [ ] **Step 3: Implement `split_video.py`**
+
+```python
+"""Even-split a >10s clip into Kling-legal (3-10s) segments via ffmpeg."""
+import argparse
+import math
+import pathlib
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from relight_common import GuidedError
+
+MAX_LEN, MIN_LEN = 10.0, 3.0
+
+
+def plan_segments(duration: float, max_len: float = MAX_LEN, min_len: float = MIN_LEN):
+    if duration <= max_len:
+        return [(0.0, round(duration, 3))]
+    n = math.ceil(duration / max_len)
+    seg = duration / n
+    out = []
+    for i in range(n):
+        start = round(i * seg, 3)
+        length = round(seg, 3)
+        out.append((start, length))
+    return out
+
+
+def split_video(path: str, work_dir: str, segments) -> list[str]:
+    if shutil.which("ffmpeg") is None:
+        raise GuidedError("ffmpeg not found. Run install.ps1 (installs ffmpeg via winget).")
+    pathlib.Path(work_dir).mkdir(parents=True, exist_ok=True)
+    out_paths = []
+    for i, (start, length) in enumerate(segments):
+        seg_out = str(pathlib.Path(work_dir) / f"seg_{i:03d}.mp4")
+        cmd = ["ffmpeg", "-y", "-i", str(path), "-ss", f"{start}", "-t", f"{length}",
+               "-c:v", "libx264", "-c:a", "aac", seg_out]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise GuidedError(f"ffmpeg failed splitting segment {i}: {e.stderr[-300:]}")
+        out_paths.append(seg_out)
+    return out_paths
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Even-split a clip into 3-10s segments.")
+    ap.add_argument("video")
+    ap.add_argument("duration", type=float)
+    ap.add_argument("--work", default="relight_work")
+    args = ap.parse_args()
+    try:
+        import json
+        segs = plan_segments(args.duration)
+        paths = split_video(args.video, args.work, segs)
+        print(json.dumps({"segments": segs, "paths": paths}, indent=2))
+    except GuidedError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest .claude/skills/relight/tests/test_split_video.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add .claude/skills/relight/scripts/split_video.py .claude/skills/relight/tests/test_split_video.py
+git commit -m "feat(relight): even-split long clips into Kling-legal segments"
+```
+
+---
+
+### Task 6: Concatenation (`concat_video.py`)
+
+**Files:**
+- Create: `.claude/skills/relight/scripts/concat_video.py`
+- Test: `.claude/skills/relight/tests/test_concat_video.py`
+
+**Interfaces:**
+- Consumes: `relight_common.GuidedError`.
+- Produces:
+  - `build_concat_list(paths: list[str]) -> str` — ffmpeg concat-demuxer text; one `file '<path>'` line per path, in order, backslashes normalized to `/`.
+  - `concat_videos(paths: list[str], out_path: str) -> str` — writes a temp list file next to `out_path`, runs `ffmpeg -f concat -safe 0 -i list -c copy out` (falls back to re-encode), returns `out_path`. Raises `GuidedError` if ffmpeg missing.
+
+- [ ] **Step 1: Write the failing tests**
+
+`.claude/skills/relight/tests/test_concat_video.py`:
+```python
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+import concat_video as cv
+
+
+def test_concat_list_order_and_format():
+    txt = cv.build_concat_list(["a.mp4", "b.mp4"])
+    assert txt.strip().splitlines() == ["file 'a.mp4'", "file 'b.mp4'"]
+
+
+def test_concat_list_normalizes_backslashes():
+    txt = cv.build_concat_list([r"C:\work\seg_000.mp4"])
+    assert txt.strip() == "file 'C:/work/seg_000.mp4'"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest .claude/skills/relight/tests/test_concat_video.py -v`
+Expected: FAIL — `ModuleNotFoundError: concat_video`.
+
+- [ ] **Step 3: Implement `concat_video.py`**
+
+```python
+"""Concatenate ordered relit segments into a single MP4 via ffmpeg."""
+import argparse
+import pathlib
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from relight_common import GuidedError
+
+
+def build_concat_list(paths) -> str:
+    return "".join(f"file '{str(p).replace(chr(92), '/')}'\n" for p in paths)
+
+
+def concat_videos(paths, out_path: str) -> str:
+    if shutil.which("ffmpeg") is None:
+        raise GuidedError("ffmpeg not found. Run install.ps1 (installs ffmpeg via winget).")
+    out = pathlib.Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    list_path = out.parent / "concat_list.txt"
+    list_path.write_text(build_concat_list([str(p) for p in paths]), encoding="utf-8")
+    base = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path)]
+    try:
+        subprocess.run(base + ["-c", "copy", str(out)], capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError:
+        # Stream-copy can fail if segment codecs differ; re-encode as fallback.
+        subprocess.run(base + ["-c:v", "libx264", "-c:a", "aac", str(out)],
+                       capture_output=True, text=True, check=True)
+    return str(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Concat ordered mp4 segments.")
+    ap.add_argument("out")
+    ap.add_argument("segments", nargs="+")
+    args = ap.parse_args()
+    try:
+        print(concat_videos(args.segments, args.out))
+    except GuidedError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest .claude/skills/relight/tests/test_concat_video.py -v`
+Expected: 2 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add .claude/skills/relight/scripts/concat_video.py .claude/skills/relight/tests/test_concat_video.py
+git commit -m "feat(relight): concat relit segments into a single mp4"
+```
+
+---
+
+### Task 7: Batch orchestrator (`relight_batch.py`)
+
+**Files:**
+- Create: `.claude/skills/relight/scripts/relight_batch.py`
+- Test: `.claude/skills/relight/tests/test_relight_batch.py`
+
+**Interfaces:**
+- Consumes: `extract_frame.probe_video`, `split_video.{plan_segments, split_video}`, `concat_video.concat_videos`, `relight_video.{run as relight_video_run, ENDPOINT}`, `relight_common.{GuidedError, estimate_image_cost, estimate_video_cost}`.
+- Produces:
+  - `estimate_batch(duration: float, resolution="2K") -> dict` — `{"segments": int, "image_cost": float, "video_cost": float, "total": float}` (`video_cost` = Σ per-segment estimate; `total` = image + video).
+  - `run_batch(video_path, still_path, work_dir, out_path, approved=False, dry_run=False, resolution="2K") -> dict` — probes, plans segments; `dry_run` returns `{"endpoint","plan","est_cost"}` with no spend; otherwise requires `approved=True` (else `GuidedError`), splits, relights each segment with the shared still (`relight_video_run(..., approved=True)`), concats, returns `{"video","segments","est_cost"}`. On a segment failure: raise `GuidedError` naming the segment index; do NOT concat a partial.
+
+- [ ] **Step 1: Write the failing tests**
+
+`.claude/skills/relight/tests/test_relight_batch.py`:
+```python
+import sys, pathlib
+import pytest
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+import relight_batch as rb
+import relight_common as rc
+
+PROBE = {"duration": 21.0, "width": 1920, "height": 1080, "size_bytes": 1000}
+
+
+def test_estimate_batch_counts_and_total():
+    est = rb.estimate_batch(21.0, "2K")
+    assert est["segments"] == 3
+    assert est["total"] == round(0.15 + 3 * round(0.169 * 7, 2), 2)   # 0.15 + 3*1.18 = 3.69
+
+
+def test_dry_run_spends_nothing(monkeypatch):
+    monkeypatch.setattr(rb, "probe_video", lambda p: PROBE)
+    out = rb.run_batch("v.mp4", "s.png", "work", "out.mp4", dry_run=True)
+    assert out["plan"]["segments"] == 3
+    assert out["est_cost"]["total"] == rb.estimate_batch(21.0)["total"]
+
+
+def test_real_run_refuses_without_approval(monkeypatch):
+    monkeypatch.setattr(rb, "probe_video", lambda p: PROBE)
+    with pytest.raises(rc.GuidedError) as e:
+        rb.run_batch("v.mp4", "s.png", "work", "out.mp4", dry_run=False, approved=False)
+    assert "approv" in str(e.value).lower()
+
+
+def test_segment_failure_stops_without_concat(monkeypatch):
+    monkeypatch.setattr(rb, "probe_video", lambda p: PROBE)
+    monkeypatch.setattr(rb, "split_video", lambda p, w, segs: ["s0.mp4", "s1.mp4", "s2.mp4"])
+    def boom(*a, **k): raise RuntimeError("fal 500")
+    monkeypatch.setattr(rb, "relight_video_run", boom)
+    called = {"concat": False}
+    monkeypatch.setattr(rb, "concat_videos", lambda *a, **k: called.__setitem__("concat", True))
+    with pytest.raises(rc.GuidedError) as e:
+        rb.run_batch("v.mp4", "s.png", "work", "out.mp4", dry_run=False, approved=True)
+    assert "segment" in str(e.value).lower()
+    assert called["concat"] is False
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest .claude/skills/relight/tests/test_relight_batch.py -v`
+Expected: FAIL — `ModuleNotFoundError: relight_batch`.
+
+- [ ] **Step 3: Implement `relight_batch.py`**
+
+```python
+"""Batch relight: split a >10s clip, relight each segment with one shared still, concat."""
+import argparse
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from relight_common import GuidedError, estimate_image_cost, estimate_video_cost
+from extract_frame import probe_video
+from split_video import plan_segments, split_video
+from concat_video import concat_videos
+from relight_video import run as relight_video_run, ENDPOINT
+
+try:
+    import fal_client
+except ImportError:
+    fal_client = None
+
+
+def estimate_batch(duration: float, resolution: str = "2K") -> dict:
+    segs = plan_segments(duration)
+    video = round(sum(estimate_video_cost(length) for _, length in segs), 2)
+    image = estimate_image_cost(resolution)
+    return {"segments": len(segs), "image_cost": image, "video_cost": video,
+            "total": round(image + video, 2)}
+
+
+def run_batch(video_path, still_path, work_dir, out_path,
+              approved=False, dry_run=False, resolution="2K") -> dict:
+    probe = probe_video(video_path)
+    duration = probe["duration"]
+    segments = plan_segments(duration)
+    if dry_run:
+        return {"endpoint": ENDPOINT,
+                "plan": {"segments": len(segments), "lengths": [l for _, l in segments]},
+                "est_cost": estimate_batch(duration, resolution)}
+    if not approved:
+        raise GuidedError("Batch relight not approved. Confirm the still + total cost before the paid run.")
+    seg_paths = split_video(video_path, work_dir, segments)
+    relit = []
+    for i, (seg_path, (_, length)) in enumerate(zip(seg_paths, segments)):
+        seg_out = str(pathlib.Path(work_dir) / f"relit_{i:03d}.mp4")
+        try:
+            relight_video_run(seg_path, still_path, length, seg_out, approved=True)
+        except Exception as e:
+            raise GuidedError(
+                f"Segment {i} failed: {e}. {len(relit)} of {len(segments)} segments rendered; "
+                f"not concatenating a partial result. Re-run when resolved."
+            )
+        relit.append(seg_out)
+    concat_videos(relit, out_path)
+    return {"video": out_path, "segments": len(segments), "est_cost": estimate_batch(duration, resolution)["total"]}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Batch relight a >10s clip.")
+    ap.add_argument("video")
+    ap.add_argument("still")
+    ap.add_argument("--work", default="relight_work")
+    ap.add_argument("--out", default="relit_video.mp4")
+    ap.add_argument("--resolution", default="2K", choices=["1K", "2K", "4K"])
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--approved", action="store_true")
+    args = ap.parse_args()
+    try:
+        import json
+        print(json.dumps(run_batch(args.video, args.still, args.work, args.out,
+                                   approved=args.approved, dry_run=args.dry_run,
+                                   resolution=args.resolution), indent=2))
+    except GuidedError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest .claude/skills/relight/tests/test_relight_batch.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Run the full suite**
+
+Run: `python -m pytest .claude/skills/relight/tests/ -v`
+Expected: 25 passed.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add .claude/skills/relight/scripts/relight_batch.py .claude/skills/relight/tests/test_relight_batch.py
+git commit -m "feat(relight): batch orchestrator (split -> relight each -> concat)"
+```
+
+---
+
+### Task 8: Preflight check (`preflight.py`)
 
 **Files:**
 - Create: `.claude/skills/relight/scripts/preflight.py`
@@ -738,7 +1137,7 @@ git commit -m "feat(relight): environment preflight check"
 
 ---
 
-### Task 6: Orchestration doc (`SKILL.md`)
+### Task 9: Orchestration doc (`SKILL.md`)
 
 **Files:**
 - Create: `.claude/skills/relight/SKILL.md`
@@ -750,16 +1149,22 @@ git commit -m "feat(relight): environment preflight check"
 Frontmatter + body. Required content:
 - Frontmatter `name: relight`, `description:` triggering on "relight", "fix my lighting/background", "put me in a new background/studio", talking-head footage, referencing Fal/Nano Banana/Kling.
 - **Setup section:** point to `install.ps1`; how to put the key in `.env` (edit the file, never paste in chat); run `preflight.py`.
-- **Inputs:** video file path (3–10s), a text description, optional reference image path. Tell the user to copy-as-path on Windows.
+- **Inputs:** video file path (any length — ≤10s runs single, >10s runs batch), a text description, optional reference image path. Tell the user to copy-as-path on Windows.
 - **Run order (exact commands):**
-  1. `python scripts/extract_frame.py "<video>" --out "<work>/frame.png"` → read JSON; if `warnings` non-empty, relay them and, for an over-length clip, offer to trim with `ffmpeg -i in -t 10 -c copy out` before continuing.
-  2. `python scripts/relight_image.py "<work>/frame.png" "<user prompt>" [--reference "<ref>"] --out "<work>/still.png" --resolution 2K` → show the still to the user.
-  3. **Approval gate:** present the still + `est_cost` for the video (use `relight_video.py --dry-run` to get the figure). Ask the user to approve or request a rerun (loop back to step 2 with tweaks).
-  4. On approval: `python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --out "<output_dir>/relit_<name>.mp4" --approved` → report the final path.
-- **Output dir rule:** default `./relight-outputs/` in the CWD project; fall back to `~/Documents/relight/`; honor a user-specified path.
-- **Cost transparency:** always state the dollar estimate before the paid video step; never run it without explicit approval.
-- **Error handling:** if any script exits non-zero, relay the `ERROR:` line verbatim and stop; don't retry blindly.
-- **Constraint reminder:** one clip ≤10s per run; longer footage must be split (out of scope for v1).
+  1. `python scripts/extract_frame.py "<video>" --out "<work>/frame.png"` → read the JSON. Note `probe.duration`. If `warnings` mention resolution/size, relay and stop (these aren't auto-fixable). Duration is handled by branching below, not a warning-stop.
+  2. `python scripts/relight_image.py "<work>/frame.png" "<user prompt>" [--reference "<ref>"] --out "<work>/still.png" --resolution 2K` → show the still to the user. (One still is generated from the whole video's best frame and reused for every segment in batch mode.)
+  3. **Approval gate (cost depends on the branch):**
+     - If `duration ≤ 10`: get the figure from `python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --dry-run`.
+     - If `duration > 10`: get the figure from `python scripts/relight_batch.py "<video>" "<work>/still.png" --dry-run` → use `est_cost.total` and report the segment count (e.g., "23s → 3 segments → ~$2.49 total").
+     - Present the still + the dollar estimate. Ask the user to approve or request a rerun (loop back to step 2 with tweaks).
+  4. **On approval, branch:**
+     - `duration ≤ 10`: `python scripts/relight_video.py "<video>" "<work>/still.png" <duration> --out "<output_dir>/relit_<name>.mp4" --approved`
+     - `duration > 10`: `python scripts/relight_batch.py "<video>" "<work>/still.png" --work "<work>" --out "<output_dir>/relit_<name>.mp4" --approved`
+     → report the final path. The batch path splits, relights each segment with the shared still, and concatenates automatically.
+- **Output dir rule:** default `./relight-outputs/` in the CWD project; fall back to `~/Documents/relight/`; honor a user-specified path. `<work>` is a temp subfolder (e.g., `<output_dir>/.work-<name>/`) for frames + segments.
+- **Cost transparency:** always state the dollar estimate before the paid step; for batch, state the per-segment count and total; never run without explicit approval.
+- **Error handling:** if any script exits non-zero, relay the `ERROR:` line verbatim and stop; don't retry blindly. For a batch mid-failure, relay which segment failed — already-rendered segments are kept in `<work>`, nothing partial is concatenated.
+- **Constraint reminder:** each Kling call is one 3–10s segment. ≤10s footage = one call; >10s = automatic even-split + concat. The 3s floor means a sub-3s clip is rejected (relay the floor and stop).
 
 - [ ] **Step 2: Commit**
 
@@ -770,7 +1175,7 @@ git commit -m "docs(relight): SKILL.md orchestration + approval gate"
 
 ---
 
-### Task 7: Installer + README + symlink
+### Task 10: Installer + README + symlink
 
 **Files:**
 - Create: `install.ps1`
@@ -821,7 +1226,7 @@ Write-Host "  python `"$repoSkill\scripts\preflight.py`""
 
 - [ ] **Step 2: Write `README.md`**
 
-Cover: what it does (1 paragraph + before/after framing), the 3–10s constraint, prerequisites (Claude Code, Python, a Fal key with credit), `git clone` → `./install.ps1` → edit `.env` → `preflight.py`, usage example ("Use the relight skill on `C:\path\clip.mp4` — put me in a three-point setup with neon streamer lights; reference `C:\path\ref.jpg`"), cost expectations (~$0.15 image + <$1 video for short clips), and that outputs land in `relight-outputs/`. Credit the Systems by Vic video as inspiration.
+Cover: what it does (1 paragraph + before/after framing), how clips ≤10s run as a single relight and longer clips are auto-split into 3–10s segments and concatenated (with one shared still for consistency), prerequisites (Claude Code, Python, a Fal key with credit), `git clone` → `./install.ps1` → edit `.env` → `preflight.py`, usage example ("Use the relight skill on `C:\path\clip.mp4` — put me in a three-point setup with neon streamer lights; reference `C:\path\ref.jpg`"), cost expectations (~$0.15 image + ~$0.17/sec video; e.g. a 24s clip ≈ 3 segments ≈ $4), and that outputs land in `relight-outputs/`. Credit the Systems by Vic video as inspiration.
 
 - [ ] **Step 3: Commit**
 
@@ -832,28 +1237,32 @@ git commit -m "feat(relight): installer, README, user-level symlink"
 
 ---
 
-### Task 8: End-to-end done-gate (manual, paid)
+### Task 11: End-to-end done-gate (manual, paid)
 
 **Files:** None (verification only).
 
 - [ ] **Step 1:** Run `install.ps1`, edit `.env` with a real `FAL_KEY`, run `preflight.py` → expect `READY`.
-- [ ] **Step 2:** Export a real ≤10s talking-head clip; run the full skill flow end-to-end through Claude Code.
-- [ ] **Step 3:** Verify the done-gate: lighting cinematic/flattering, identity preserved, background matches intent and animates subtly, **audio preserved**, output in `relight-outputs/`, cost shown before the paid step.
-- [ ] **Step 4:** For any defect found, add a regression test under `tests/` and fix before calling it done.
+- [ ] **Step 2 (single):** Export a real ≤10s talking-head clip; run the full skill flow end-to-end through Claude Code.
+- [ ] **Step 3 (single) verify done-gate:** lighting cinematic/flattering, identity preserved, background matches intent and animates subtly, **audio preserved**, output in `relight-outputs/`, cost shown before the paid step.
+- [ ] **Step 4 (batch):** Run a real clip **>10s** (e.g. ~20–25s). Confirm: the cost gate reports the segment count + total before spending; the same approved still is used for all segments; the final stitched MP4 plays continuously with **audio intact across seams**; seams are not jarring; output is a single file in `relight-outputs/`.
+- [ ] **Step 5:** For any defect found (single or batch — e.g. audio gap at a seam, visible lighting jump between segments, wrong segment order), add a regression test under `tests/` and fix before calling it done.
 
 ---
 
 ## Test Plan
 
-- **Smoke test:** `python -m pytest .claude/skills/relight/tests/ -v` → 15 passed (pure logic, no paid calls). Plus `preflight.py` printing a correct checklist. Pass signal: all unit tests green and preflight accurately reports environment state.
+- **Smoke test:** `python -m pytest .claude/skills/relight/tests/ -v` → 25 passed (pure logic, no paid calls). Plus `preflight.py` printing a correct checklist. Pass signal: all unit tests green and preflight accurately reports environment state.
 - **Backend / script-logic tests (in the tasks above):**
   - *common:* cost tables; `load_fal_key` guided-stop on missing/blank key vs. success.
   - *extract_frame:* sharp>blurry sharpness; `validate_clip` OK at 5s/1080p; flags >10s duration, >200MB size, <720p resolution.
   - *relight_image:* cinematic template wraps the user prompt; reference image appended only when supplied; `--dry-run` returns payload + cost and touches no Fal client.
   - *relight_video:* `keep_audio=true` + `image_urls=[still]` + duration string; out-of-bounds duration raises before any call; `--dry-run` spends nothing; **real run refuses without `approved=True`**.
-- **Abuse / edge / concurrency:** missing `FAL_KEY` → guided stop (not a stack trace); nonexistent video/reference path → clean `GuidedError`; corrupt/non-video file → `probe_video` raises cleanly; over-length clip → warning + trim offer, never silent truncation; re-approval/rerun at the gate re-uses the approved still and does not double-spend.
-- **Cost-safety regression:** `test_real_run_refuses_without_approval` + the two `--dry-run` tests prove no paid call happens without (a) a key and (b) explicit approval for video. This is the core money-safety guard.
-- **AI-output quality (manual done-gate, Task 8):** one real paid run judged on cinematic/flattering lighting, identity preservation, background match + subtle animation, audio preservation — not just "a file came back."
-- **Known-bug regressions:** each defect from Task 8 gets a test under `tests/` so it can't silently return.
-- **Done-gate:** unit suite green + preflight accurate + cost-safety green + one human-reviewed real run (golden path + audio + identity + background animation + edge/error states) before calling the skill done.
+  - *split_video:* `plan_segments` returns `ceil(dur/10)` segments all within 3–10s and covering the full duration; 10.0s stays single, 10.1s → 2; the 21s case yields 3×7s (never a sub-3s tail).
+  - *concat_video:* `build_concat_list` emits ordered, backslash-normalized `file '…'` lines.
+  - *relight_batch:* `estimate_batch` reports correct segment count + total; `--dry-run` spends nothing; **refuses without `--approved`**; a mid-batch segment failure raises naming the segment and **does not concat a partial**.
+- **Abuse / edge / concurrency:** missing `FAL_KEY` → guided stop (not a stack trace); nonexistent video/reference path → clean `GuidedError`; corrupt/non-video file → `probe_video` raises cleanly; resolution/size out of bounds → stop (no silent truncation); duration boundary 10.0 vs 10.1 routes single vs batch; re-approval/rerun at the gate re-uses the approved still and does not double-spend.
+- **Cost-safety regression:** `relight_video` and `relight_batch` both refuse the real run without approval, and all three `--dry-run` paths spend nothing — proving no paid call happens without (a) a key and (b) explicit approval. This is the core money-safety guard, now covering the multi-segment batch total too.
+- **AI-output quality (manual done-gate, Task 11):** one real single-clip run + one real batch (>10s) run judged on cinematic/flattering lighting, identity preservation, background match + subtle animation, audio preservation, and — for batch — seam continuity (audio + visual) across stitched segments. Not just "a file came back."
+- **Known-bug regressions:** each defect from Task 11 (single or batch, e.g. seam audio gap, inter-segment lighting jump, wrong order) gets a test under `tests/` so it can't silently return.
+- **Done-gate:** unit suite (25) green + preflight accurate + cost-safety green + one human-reviewed single run AND one human-reviewed batch run (golden path + audio + identity + background animation + seam continuity + edge/error states) before calling the skill done.
 ```
