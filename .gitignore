@@ -1,5 +1,7 @@
 .env
+fal.env
 relight-outputs/
+mediagen-outputs/
 __pycache__/
 *.pyc
 desktop.ini

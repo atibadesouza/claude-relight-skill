@@ -151,3 +151,37 @@ estimate (and, for longer clips, the segment count) before anything is spent.
   .env.example
 install.ps1                one-step installer
 ```
+
+---
+
+# MediaGen — sibling skill (image & video generation)
+
+MediaGen is a second Claude Code skill in this repo, built on the same shared Fal core
+(`falkit`) and the **same `~/.claude/fal.env` key** as Relight. It's a general
+media-generation toolkit:
+
+- **Text → image** — describe an idea; Claude expands it into a strong prompt and generates it (Nano Banana Pro).
+- **Image edit with references** — transform images using reference photos, identity-preserving (Nano Banana Pro edit).
+- **Image → video** — animate a still into a clip (Kling v3 Pro); cost shown + approval before spending.
+- **Upscale** — sharpen any video to 2K/4K (Topaz); cost shown + approval.
+
+**You never name a model.** Just say what you want ("generate an image of…", "animate this",
+"upscale this") — MediaGen maps the task to the best Fal model automatically. Power users can
+override with `--model`/`--tier`, but never have to.
+
+## Shared core (`falkit`)
+
+Both skills import a small editable package, `falkit-core/` (installed via `pip install -e`),
+which holds the Fal key loading, client wrappers, the **task → best-model registry**, and cost
+estimators. One key in `~/.claude/fal.env` serves both skills. `install.ps1` installs `falkit`,
+both skills' deps, links both skills, seeds the shared key, and verifies the import.
+
+## Usage
+
+> Use MediaGen to generate an image of a husky astronaut on Mars, cinematic.
+
+> Animate that image into a 4-second clip.   (cost shown → you approve → it renders)
+
+> Upscale this clip to 4K.   (cost shown → you approve)
+
+Outputs land in `mediagen-outputs/<slug>/`.
