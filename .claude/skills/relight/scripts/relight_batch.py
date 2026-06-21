@@ -25,7 +25,7 @@ def estimate_batch(duration: float, resolution: str = "2K") -> dict:
 
 
 def run_batch(video_path, still_path, work_dir, out_path,
-              approved=False, dry_run=False, resolution="2K") -> dict:
+              approved=False, dry_run=False, resolution="2K", prompt=None) -> dict:
     probe = probe_video(video_path)
     duration = probe["duration"]
     segments = plan_segments(duration)
@@ -40,7 +40,7 @@ def run_batch(video_path, still_path, work_dir, out_path,
     for i, (seg_path, (_, length)) in enumerate(zip(seg_paths, segments)):
         seg_out = str(pathlib.Path(work_dir) / f"relit_{i:03d}.mp4")
         try:
-            relight_video_run(seg_path, still_path, length, seg_out, approved=True)
+            relight_video_run(seg_path, still_path, length, seg_out, approved=True, prompt=prompt)
         except Exception as e:
             raise GuidedError(
                 f"Segment {i} failed: {e}. {len(relit)} of {len(segments)} segments rendered; "
@@ -58,6 +58,7 @@ def main():
     ap.add_argument("--work", default="relight_work")
     ap.add_argument("--out", default="relit_video.mp4")
     ap.add_argument("--resolution", default="2K", choices=["1K", "2K", "4K"])
+    ap.add_argument("--prompt", default=None, help="Override the background/relight instruction (applied to every segment).")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--approved", action="store_true")
     args = ap.parse_args()
@@ -65,7 +66,7 @@ def main():
         import json
         print(json.dumps(run_batch(args.video, args.still, args.work, args.out,
                                    approved=args.approved, dry_run=args.dry_run,
-                                   resolution=args.resolution), indent=2))
+                                   resolution=args.resolution, prompt=args.prompt), indent=2))
     except GuidedError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

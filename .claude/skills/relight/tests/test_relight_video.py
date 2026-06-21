@@ -19,6 +19,13 @@ def test_build_request_rejects_out_of_bounds_duration():
         rv.build_video_request("v.mp4", "s.png", 14.0)
 
 
+def test_prompt_override_used_when_given():
+    req = rv.build_video_request("v.mp4", "s.png", 5.0, prompt="custom scene")
+    assert req["prompt"] == "custom scene"
+    # default still applies when no override
+    assert rv.build_video_request("v.mp4", "s.png", 5.0)["prompt"] == rv.VIDEO_PROMPT
+
+
 def test_dry_run_spends_nothing_no_approval_needed(monkeypatch):
     monkeypatch.setattr(rv, "fal_client", None)
     out = rv.run("v.mp4", "s.png", 4.5, "out.mp4", dry_run=True)
