@@ -27,6 +27,20 @@ def main():
     except GuidedError as e:
         ok = False
         print(f"[XX] FAL_KEY: {e}")
+    # Sync mode only — advisory, never flips `ok` (Motion mode needs only the Fal key)
+    try:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import heygen_common
+        heygen_common.load_heygen_key()
+        print("[OK] HeyGen key found — Sync mode (Avatar IV) available")
+    except Exception:
+        print("[--] HeyGen key not set — Sync mode unavailable (Motion mode still works). "
+              "Add ~/.claude/heygen.env to enable.")
+    try:
+        import requests  # noqa: F401
+        print("[OK] python: requests")
+    except ImportError:
+        print("[--] 'requests' not installed — Sync mode needs it. Run install.ps1 / pip install -r requirements.txt.")
     print("\nREADY" if ok else "\nNOT READY - fix the [XX] items above.")
     sys.exit(0 if ok else 1)
 
