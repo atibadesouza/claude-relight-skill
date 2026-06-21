@@ -3,3 +3,6 @@ relight-outputs/
 __pycache__/
 *.pyc
 desktop.ini
+*.egg-info/
+falkit-core/build/
+__editable__.*

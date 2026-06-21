@@ -17,10 +17,13 @@ except ImportError:
 
 # tier -> Fal endpoint. Same shape as the planned falkit model registry, so this
 # lifts into falkit/MediaGen unchanged. "model" is the sync-lipsync sub-model
-# (None for endpoints that take no model param, e.g. latentsync).
+# (None for endpoints that take no model param). "video_key" is the input field
+# name for the source video (most use "video_url"; musetalk uses "source_video_url").
 LIPSYNC_MODELS = {
-    "best":  {"endpoint": "fal-ai/sync-lipsync/v2", "model": "lipsync-2"},
-    "cheap": {"endpoint": "fal-ai/latentsync",      "model": None},
+    "best":     {"endpoint": "fal-ai/sync-lipsync/v2",                  "model": "lipsync-2", "video_key": "video_url"},
+    "cheap":    {"endpoint": "fal-ai/latentsync",                       "model": None,        "video_key": "video_url"},
+    "musetalk": {"endpoint": "fal-ai/musetalk",                         "model": None,        "video_key": "source_video_url"},
+    "kling":    {"endpoint": "fal-ai/kling-video/lipsync/audio-to-video", "model": None,      "video_key": "video_url"},
 }
 
 
@@ -39,6 +42,10 @@ def estimate_lipsync_cost(duration_s: float, tier: str = "best") -> float:
         if duration_s <= 40.0:
             return 0.20
         return round(0.20 + 0.005 * (duration_s - 40.0), 2)
+    if tier == "musetalk":  # ~ $0.04 per inference (mouth-region repaint)
+        return 0.04
+    if tier == "kling":     # ~ $0.014 / s
+        return round(0.014 * duration_s, 2)
     # best: sync-lipsync v2 (lipsync-2) ~ $3.00 / minute
     return round(3.00 * duration_s / 60.0, 2)
 
@@ -52,7 +59,7 @@ def audio_extract_cmd(video_path: str, out_path: str) -> list[str]:
 
 def build_lipsync_request(entry: dict, video_url: str, audio_url: str,
                           sync_mode: str = "cut_off") -> dict:
-    req = {"video_url": video_url, "audio_url": audio_url}
+    req = {entry.get("video_key", "video_url"): video_url, "audio_url": audio_url}
     if entry.get("model"):           # sync-lipsync family takes model + sync_mode
         req["model"] = entry["model"]
         req["sync_mode"] = sync_mode
@@ -118,7 +125,7 @@ def main():
         description="Re-sync a talking-head clip's mouth to its audio (final relight stage).")
     ap.add_argument("video", help="Video to lip-sync (e.g. the '<name> Relit.mp4').")
     ap.add_argument("--out", default="synced_video.mp4")
-    ap.add_argument("--tier", choices=["best", "cheap"], default="best")
+    ap.add_argument("--tier", choices=["best", "cheap", "musetalk", "kling"], default="best")
     ap.add_argument("--audio", default=None,
                     help="Audio to sync to. Default: extracted from the video itself.")
     ap.add_argument("--sync-mode", default="cut_off",
