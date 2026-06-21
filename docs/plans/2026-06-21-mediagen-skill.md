@@ -368,7 +368,7 @@ git commit -m "feat(falkit): task->model registry, resolver, cost estimators"
 
 **Interfaces:** `relight_common` keeps `GuidedError`, `load_fal_key`, `estimate_image_cost`, `estimate_video_cost`, `find_skill_root` — backed by `falkit` when importable, with an inline fallback when it is not.
 
-> **Regression note (per round-1 review):** this task **updates 2 of relight's existing tests** (`test_common.py`'s two `load_fal_key` tests) so they remain deterministic under falkit's shared-key precedence. The claim is "26 relight tests still pass, 2 of them updated for shared-key precedence" — NOT "26 unchanged." For these 2 tests, editing the test is the correct fix (the shim cannot fix a test that doesn't isolate `FAL_KEY`/`shared_key_path`).
+> **Regression note (per round-1/2 review):** this task **updates 2 of relight's existing tests** (`test_common.py`'s two `load_fal_key` tests) so they remain deterministic under falkit's shared-key precedence. The gate is "0 failed" across the relight suite (40 existing on this branch + 3 appended here); editing those 2 tests is the correct fix (the shim cannot fix a test that doesn't isolate `FAL_KEY`/`shared_key_path`).
 
 - [ ] **Step 1: Rewrite `relight_common.py` as a shim with graceful fallback**
 
@@ -1245,3 +1245,13 @@ git commit -m "feat(mediagen): installer (falkit editable, mediagen link, shared
 **Contested:** none on substance. One framing note (not a reversal): the count drift was partly because the relight suite changed *underneath* this plan (the user added a lip-sync stage mid-stream), not purely a planning miscount — which is exactly why the fix is to assert "0 failed" + re-baseline dynamically rather than chase a moving integer.
 
 **Plan body changes:** Task 3 Step 3 expanded (import-smoke-all-scripts + fallback-without-falkit tests); Step 4 gate → "0 failed", count 43; Test Plan smoke + relight-regression + done-gate re-baselined to "0 failed / ≈69, re-baseline via pytest --co"; header + constraints counts corrected (no more hardcoded 26/27).
+
+### Round 3 — 2026-06-21
+
+**Reviewer verdict:** APPROVED
+
+**Reviewer summary:** Round-2 fixes verified against the real codebase — relight collects exactly 40 (`pytest --co`), all pass-conditions re-baselined to "0 failed"; the import-smoke covers all 8 `relight_common` importers (incl. `preflight.py`, `lipsync_video.py`); the `sys.modules['falkit']=None` trick empirically forces the `except ImportError` branch so the fallback is genuinely tested; cost arithmetic, approval gates, installer ordering, and resolver architecture all confirmed sound. One trivial stale "26" in an explanatory aside (line 371) flagged as a non-blocking copy-edit — fixed.
+
+**Plan body changes:** corrected the line-371 regression-note prose to "0 failed (40 existing + 3 appended)". No other changes — plan APPROVED for implementation.
+
+**Loop result:** APPROVED at round 3 of max 3.
