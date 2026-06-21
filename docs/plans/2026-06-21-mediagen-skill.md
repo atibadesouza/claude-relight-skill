@@ -70,7 +70,7 @@ fal.env.example                          NEW (shared key example)
 name = "falkit"
 version = "0.1.0"
 description = "Shared Fal AI core for Claude media skills (Relight, MediaGen)."
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = ["fal-client>=0.5.0"]
 
 [build-system]
@@ -366,49 +366,119 @@ git commit -m "feat(falkit): task->model registry, resolver, cost estimators"
 - Modify: `.claude/skills/relight/scripts/relight_common.py`
 - (verify) `.claude/skills/relight/tests/` — all must still pass.
 
-**Interfaces:** `relight_common` keeps `GuidedError`, `load_fal_key`, `estimate_image_cost`, `estimate_video_cost`, `find_skill_root` — now backed by `falkit`.
+**Interfaces:** `relight_common` keeps `GuidedError`, `load_fal_key`, `estimate_image_cost`, `estimate_video_cost`, `find_skill_root` — backed by `falkit` when importable, with an inline fallback when it is not.
 
-- [ ] **Step 1: Rewrite `relight_common.py` as a shim**
+> **Regression note (per round-1 review):** this task **updates 2 of relight's existing tests** (`test_common.py`'s two `load_fal_key` tests) so they remain deterministic under falkit's shared-key precedence. The claim is "26 relight tests still pass, 2 of them updated for shared-key precedence" — NOT "26 unchanged." For these 2 tests, editing the test is the correct fix (the shim cannot fix a test that doesn't isolate `FAL_KEY`/`shared_key_path`).
+
+- [ ] **Step 1: Rewrite `relight_common.py` as a shim with graceful fallback**
+
+The shim prefers `falkit`, but if `falkit` is not importable (e.g. someone installed Relight without running `install.ps1`), it falls back to an inline copy of the original implementation so **Relight never hard-crashes on a missing shared core** (round-1 blast-radius blindspot).
 
 ```python
-"""Backwards-compatible shim. The shared implementation now lives in `falkit`."""
+"""Backwards-compatible shim: use shared `falkit` when available, else inline fallback."""
 import pathlib
-from falkit.core import GuidedError as GuidedError
-from falkit.core import load_fal_key as _falkit_load_fal_key
-from falkit.models import estimate_cost
 
 
 def find_skill_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
 
 
-def load_fal_key() -> str:
-    # Prefer the shared key; fall back to relight's own .env for back-compat.
-    return _falkit_load_fal_key(skill_env_path=find_skill_root() / ".env")
-
-
-def estimate_image_cost(resolution: str) -> float:
-    return estimate_cost("image", resolution=resolution)
-
-
 def estimate_video_cost(duration_s: float) -> float:
-    # Relight uses Kling O1 v2v (~$0.169/s); keep its historical rate, not the registry's.
+    # Relight uses Kling O1 v2v (~$0.169/s); keep its historical rate (not the registry's 0.168).
     return round(0.169 * duration_s, 2)
+
+
+try:
+    from falkit.core import GuidedError as GuidedError
+    from falkit.core import load_fal_key as _falkit_load_fal_key
+    from falkit.models import estimate_cost as _estimate_cost
+
+    def load_fal_key() -> str:
+        # Shared key first; relight's own .env as back-compat fallback.
+        return _falkit_load_fal_key(skill_env_path=find_skill_root() / ".env")
+
+    def estimate_image_cost(resolution: str) -> float:
+        return _estimate_cost("image", resolution=resolution)
+
+except ImportError:  # falkit not installed — degrade, do not crash.
+    import os
+
+    class GuidedError(Exception):
+        """Carries a user-facing remediation message."""
+
+    def _parse_env(text: str) -> dict:
+        out = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip().strip('"').strip("'")
+        return out
+
+    def load_fal_key() -> str:
+        env_path = find_skill_root() / ".env"
+        if not env_path.exists():
+            raise GuidedError(
+                f"No .env found. Copy {find_skill_root() / '.env.example'} to "
+                f"{env_path} and paste your Fal key into it."
+            )
+        key = _parse_env(env_path.read_text(encoding="utf-8")).get("FAL_KEY", "")
+        if not key:
+            raise GuidedError(
+                f"FAL_KEY is blank. Open {env_path}, set FAL_KEY=<your key>, and save."
+            )
+        os.environ["FAL_KEY"] = key
+        return key
+
+    def estimate_image_cost(resolution: str) -> float:
+        return {"1K": 0.15, "2K": 0.15, "4K": 0.30}.get(resolution, 0.15)
 ```
 
-- [ ] **Step 2: Run the full Relight suite**
+- [ ] **Step 2: Update the 2 shared-key tests in `test_common.py`**
+
+In `.claude/skills/relight/tests/test_common.py`, make the two `load_fal_key` tests isolate the key sources so they pass regardless of whether `~/.claude/fal.env` exists (falkit path) or not (fallback path). Add `import falkit.core` at top, then:
+
+```python
+def test_load_fal_key_missing_raises_guided(tmp_path, monkeypatch):
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setattr(falkit.core, "shared_key_path", lambda: tmp_path / "nope.env")
+    monkeypatch.setattr(rc, "find_skill_root", lambda: tmp_path)
+    (tmp_path / ".env").write_text("FAL_KEY=\n", encoding="utf-8")
+    with pytest.raises(rc.GuidedError):
+        rc.load_fal_key()
+
+
+def test_load_fal_key_present(tmp_path, monkeypatch):
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setattr(falkit.core, "shared_key_path", lambda: tmp_path / "nope.env")
+    monkeypatch.setattr(rc, "find_skill_root", lambda: tmp_path)
+    (tmp_path / ".env").write_text("FAL_KEY=abc123\n", encoding="utf-8")
+    assert rc.load_fal_key() == "abc123"
+    assert os.environ["FAL_KEY"] == "abc123"
+```
+(Guard for the fallback path: if `import falkit.core` fails because falkit isn't installed, skip the `shared_key_path` patch — wrap it `try/except ImportError`. In our environment falkit IS installed from Task 2, so the falkit path is active and the patch applies.)
+
+- [ ] **Step 3: Add a shim-smoke test**
+
+Append to `test_common.py` a test that the shim exposes its public API the way relight scripts import it (round-1 blast-radius mitigation):
+```python
+def test_shim_exposes_public_api():
+    for name in ("GuidedError", "load_fal_key", "estimate_image_cost", "estimate_video_cost", "find_skill_root"):
+        assert hasattr(rc, name)
+```
+
+- [ ] **Step 4: Run the full Relight suite**
 
 Run: `python -m pytest .claude/skills/relight/tests/ -v`
-Expected: 26 passed (unchanged). The `test_common.py` tests for `load_fal_key` use `monkeypatch.setattr(rc, "find_skill_root", ...)` and a local `.env`; since env `FAL_KEY` is unset in CI and the shared path won't exist, the skill-local fallback resolves — behavior preserved.
+Expected: 27 passed (26 prior, 2 updated + 1 new shim-smoke = the prior 26 with 2 modified, plus 1 added = 27). Update the global count accordingly (Test Plan reflects 27 relight + 14 mediagen + 9 falkit = 50).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add .claude/skills/relight/scripts/relight_common.py
-git commit -m "refactor(relight): back relight_common with shared falkit core"
+git add .claude/skills/relight/scripts/relight_common.py .claude/skills/relight/tests/test_common.py
+git commit -m "refactor(relight): back relight_common with falkit (graceful fallback) + isolate key tests"
 ```
-
-> If any relight test fails here, fix the shim (not the tests) until green before proceeding. The shared `load_fal_key` precedence must still let a skill-local `.env` resolve when env + shared file are absent.
 
 ---
 
@@ -426,12 +496,11 @@ git commit -m "refactor(relight): back relight_common with shared falkit core"
 
 `.claude/skills/mediagen/requirements.txt`:
 ```
-falkit
 fal-client>=0.5.0
 opencv-python>=4.9.0
 pytest>=8.0.0
 ```
-(`falkit` is satisfied by the editable install from Task 2.)
+> **Do NOT list `falkit` here** — it is not on PyPI and a bare `falkit` makes `pip install -r` fail with "No matching distribution" (round-1 issue 3). `falkit` is provided by the editable install (`pip install -e ./falkit`) that `install.ps1` runs as an ordered prerequisite. The editable install is the documented contract; these two skills are no longer independently pip-installable from their own `requirements.txt` alone.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -560,6 +629,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 import image_edit as ie
 
 
+def _no_spend(monkeypatch):
+    """Uniform money-guard across all four scripts (round-1 blindspot)."""
+    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("spent or keyed!"))
+    monkeypatch.setattr(ie.fal, "subscribe", boom)
+    monkeypatch.setattr(ie.fal, "load_fal_key", boom)
+    monkeypatch.setattr(ie.fal, "upload_file", boom)
+
+
 def test_build_request_includes_all_refs():
     r = ie.build_request("make it Ronaldo", ["a.png", "b.png"])
     assert r["image_urls"] == ["a.png", "b.png"]
@@ -567,7 +644,7 @@ def test_build_request_includes_all_refs():
 
 
 def test_dry_run_no_upload(monkeypatch):
-    monkeypatch.setattr(ie.fal, "upload_file", lambda p: (_ for _ in ()).throw(AssertionError("uploaded!")))
+    _no_spend(monkeypatch)
     out = ie.run("make it Ronaldo", ["a.png", "b.png"], "out.png", dry_run=True)
     assert out["endpoint"] == "fal-ai/nano-banana-pro/edit"
     assert out["payload"]["image_urls"] == ["a.png", "b.png"]
@@ -674,6 +751,14 @@ import falkit
 from falkit import GuidedError
 
 
+def _no_spend(monkeypatch):
+    """Uniform money-guard: any network/key/upload use explodes (round-1 blindspot)."""
+    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("spent or keyed!"))
+    monkeypatch.setattr(iv.fal, "subscribe", boom)
+    monkeypatch.setattr(iv.fal, "load_fal_key", boom)
+    monkeypatch.setattr(iv.fal, "upload_file", boom)
+
+
 def test_build_request_duration_and_prompt():
     r = iv.build_request("u", "a dog nods", 3)
     assert r["image_url"] == "u"
@@ -694,7 +779,7 @@ def test_needs_compression(tmp_path):
 
 
 def test_dry_run_spends_nothing(monkeypatch):
-    monkeypatch.setattr(iv.fal, "subscribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spent")))
+    _no_spend(monkeypatch)
     out = iv.run("img.png", "a dog nods", 3, "out.mp4", dry_run=True)
     assert out["endpoint"] == "fal-ai/kling-video/v3/pro/image-to-video"
     assert out["est_cost"] == 0.50  # round(0.168*3,2)
@@ -756,7 +841,8 @@ def run(image_path, prompt, duration, out_path, with_audio=False, tier="best",
     fal.load_fal_key()
     upload_path = image_path
     if needs_compression(image_path):
-        upload_path = str(pathlib.Path(out_path).with_name("_i2v_compressed.jpg"))
+        # Unique temp name (per-output) so concurrent/repeated runs don't clobber (round-1 blindspot).
+        upload_path = str(pathlib.Path(out_path).with_name(f"_{pathlib.Path(out_path).stem}_i2v_compressed.jpg"))
         _compress(image_path, upload_path)
         print(f"NOTE: image >10MB; compressed to {upload_path} for Kling.", file=sys.stderr)
     url = fal.upload_file(upload_path)
@@ -810,7 +896,8 @@ git commit -m "feat(mediagen): image->video (approval gate, >10MB auto-compress,
 
 **Interfaces (Produces):**
 - `build_request(video_url, factor=2, target_fps=None) -> dict` — `{video_url, upscale_factor, ...}`.
-- `run(video_path, out_path, factor=2, target_fps=None, duration_s=None, out_res="1080", tier="best", model=None, dry_run=False, approved=False) -> dict` — resolves `upscale`; `dry_run` no spend; real requires `approved`.
+- `output_res_tier(in_min_dim, factor) -> str` — pure: maps output short side (`in_min_dim*factor`) to a Topaz price tier `"720" | "1080" | "4K"`. This is what makes the cost reflect `factor` (round-1 blindspot: factor was ignored, so 2× and 4× quoted the same).
+- `run(video_path, out_path, factor=2, target_fps=None, duration_s=None, in_min_dim=None, out_res="1080", tier="best", model=None, dry_run=False, approved=False) -> dict` — resolves `upscale`; if `in_min_dim` given, computes `out_res = output_res_tier(in_min_dim, factor)` so the estimate scales with `factor`; caps `factor` at Topaz's 8× max (`GuidedError` above that); `dry_run` no spend; real requires `approved`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -823,17 +910,42 @@ import upscale as up
 from falkit import GuidedError
 
 
+def _no_spend(monkeypatch):
+    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("spent or keyed!"))
+    monkeypatch.setattr(up.fal, "subscribe", boom)
+    monkeypatch.setattr(up.fal, "load_fal_key", boom)
+    monkeypatch.setattr(up.fal, "upload_file", boom)
+
+
 def test_build_request_factor():
     r = up.build_request("v", factor=2)
     assert r["video_url"] == "v"
     assert r["upscale_factor"] == 2
 
 
+def test_output_res_tier_scales_with_factor():
+    assert up.output_res_tier(540, 2) == "1080"
+    assert up.output_res_tier(540, 4) == "4K"   # 2160 -> top tier
+
+
 def test_dry_run_spends_nothing(monkeypatch):
-    monkeypatch.setattr(up.fal, "subscribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spent")))
+    _no_spend(monkeypatch)
     out = up.run("in.mp4", "out.mp4", factor=2, duration_s=5, out_res="1080", dry_run=True)
     assert out["endpoint"] == "fal-ai/topaz/upscale/video"
     assert out["est_cost"] == 0.10  # round(0.02*5,2)
+
+
+def test_factor_changes_cost(monkeypatch):
+    _no_spend(monkeypatch)
+    two = up.run("in.mp4", "o.mp4", factor=2, duration_s=5, in_min_dim=540, dry_run=True)["est_cost"]
+    four = up.run("in.mp4", "o.mp4", factor=4, duration_s=5, in_min_dim=540, dry_run=True)["est_cost"]
+    assert four > two   # 4x lands in the 4K tier, costs more — factor is no longer ignored
+
+
+def test_factor_cap(monkeypatch):
+    _no_spend(monkeypatch)
+    with pytest.raises(GuidedError):
+        up.run("in.mp4", "o.mp4", factor=16, duration_s=5, dry_run=True)
 
 
 def test_real_run_refuses_without_approval(monkeypatch):
@@ -856,6 +968,7 @@ import falkit as fal
 from falkit import GuidedError
 
 TASK = "upscale"
+MAX_FACTOR = 8  # Topaz supports up to 8x
 
 
 def build_request(video_url, factor=2, target_fps=None) -> dict:
@@ -865,12 +978,28 @@ def build_request(video_url, factor=2, target_fps=None) -> dict:
     return req
 
 
-def run(video_path, out_path, factor=2, target_fps=None, duration_s=None, out_res="1080",
-        tier="best", model=None, dry_run=False, approved=False) -> dict:
+def output_res_tier(in_min_dim, factor) -> str:
+    """Map output short side (in_min_dim*factor) to a Topaz price tier."""
+    out = (in_min_dim or 0) * factor
+    if out <= 720:
+        return "720"
+    if out <= 1080:
+        return "1080"
+    return "4K"
+
+
+def run(video_path, out_path, factor=2, target_fps=None, duration_s=None, in_min_dim=None,
+        out_res="1080", tier="best", model=None, dry_run=False, approved=False) -> dict:
+    if factor > MAX_FACTOR:
+        raise GuidedError(f"Topaz supports up to {MAX_FACTOR}x; got {factor}x.")
     endpoint = fal.resolve_model(TASK, tier=tier, override=model)
-    est = fal.estimate_cost(TASK, duration_s=duration_s or 0, out_res=out_res)
+    # If we know the input short side, derive the output tier from factor so the
+    # estimate scales with factor instead of quoting a flat price (round-1 blindspot).
+    eff_res = output_res_tier(in_min_dim, factor) if in_min_dim else out_res
+    est = fal.estimate_cost(TASK, duration_s=duration_s or 0, out_res=eff_res)
     if dry_run:
-        return {"endpoint": endpoint, "payload": build_request(video_path, factor, target_fps), "est_cost": est}
+        return {"endpoint": endpoint, "payload": build_request(video_path, factor, target_fps),
+                "est_cost": est, "approx": True}
     if not approved:
         raise GuidedError("upscale not approved. Show the cost and confirm first.")
     fal.load_fal_key()
@@ -889,6 +1018,7 @@ def main():
     ap.add_argument("--factor", type=float, default=2)
     ap.add_argument("--target-fps", type=int, default=None)
     ap.add_argument("--duration", type=float, default=None)
+    ap.add_argument("--in-min-dim", type=int, default=None, help="Input short side (px); lets the cost estimate scale with --factor.")
     ap.add_argument("--out-res", default="1080")
     ap.add_argument("--tier", default="best", choices=["best", "cheap"])
     ap.add_argument("--model", default=None)
@@ -897,7 +1027,8 @@ def main():
     args = ap.parse_args()
     try:
         print(json.dumps(run(args.video, args.out, args.factor, args.target_fps, args.duration,
-                             args.out_res, args.tier, args.model, args.dry_run, args.approved), indent=2))
+                             args.in_min_dim, args.out_res, args.tier, args.model,
+                             args.dry_run, args.approved), indent=2))
     except GuidedError as e:
         print(f"ERROR: {e}", file=sys.stderr); sys.exit(1)
 
@@ -909,7 +1040,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run + full mediagen + falkit suite**
 
 Run: `python -m pytest falkit/tests/ .claude/skills/mediagen/tests/ -v`
-Expected: 23 passed (9 falkit + 3 image_generate + 3 image_edit + 5 image_to_video + 3 upscale).
+Expected: 26 passed (9 falkit + 3 image_generate + 3 image_edit + 5 image_to_video + 6 upscale).
 
 - [ ] **Step 5: Commit**
 
@@ -936,8 +1067,9 @@ Frontmatter + body. Required content:
 - **Run order per capability** (exact commands), with output to `<output_dir>/<slug>/`:
   - Image gen: `python scripts/image_generate.py "<rewritten prompt>" --out "<out>"` → show image + actual cost (no gate; cheap).
   - Image edit: `python scripts/image_edit.py "<prompt>" "<ref1>" ["<ref2>" ...] --out "<out>"` → show image + cost.
-  - Image→video: FIRST `--dry-run` to get `est_cost`; present cost + prompt; on approval re-run with `--approved`.
-  - Upscale: FIRST `--dry-run` (pass `--duration <probed secs>` + `--out-res`) for cost; on approval re-run `--approved`.
+  - Image→video: FIRST `--dry-run` to get `est_cost`; present cost + prompt; on approval re-run with `--approved`. (Note: the dry-run payload prints the *local* image path, not the uploaded URL — it is a cost/prompt preview, not the literal request.)
+  - Upscale: probe the input first with ffprobe for **duration AND short side** (min of width/height); FIRST `--dry-run --duration <secs> --in-min-dim <short side> --factor <f>` so the estimate scales with `factor` (a 4× quote is higher than a 2× quote); present it as an **approximate** cost; on approval re-run `--approved`.
+  - **Approximate-cost caveat:** image-edit reuses the image-generation price (Fal may price edits differently) and per-second video/upscale rates are pinned — always label these as approximate when shown.
 - **Offer the next step:** after an image, ask if they want to animate it; after a video, offer upscaling (mirrors Vic).
 - **Key setup:** one shared key at `~/.claude/fal.env`; if MediaGen and Relight are both installed they share it. Never paste the key in chat.
 - **Output dir rule:** `./mediagen-outputs/<slug>/` (CWD project), fallback `~/Documents/MediaGen/<slug>/`.
@@ -961,11 +1093,17 @@ git commit -m "docs(mediagen): SKILL.md orchestration (prompt rewrite, invisible
 
 **Interfaces:** None.
 
-- [ ] **Step 1: Update `install.ps1`** — add, after the existing deps step:
+- [ ] **Step 1: Update `install.ps1`** — enforce this exact order (round-1 issue 2/3): ffmpeg → **falkit editable** → mediagen requirements → relight requirements → link skills → seed shared key → **verify `import falkit`**. Add, after the ffmpeg step:
 
 ```powershell
-Write-Host "Installing shared falkit core (editable)..."
+Write-Host "Installing shared falkit core (editable) — required by BOTH skills..."
 python -m pip install -e (Join-Path $PSScriptRoot "falkit")
+
+Write-Host "Installing MediaGen Python deps..."
+python -m pip install -r (Join-Path $PSScriptRoot ".claude\skills\mediagen\requirements.txt")
+
+Write-Host "Ensuring Relight Python deps..."
+python -m pip install -r (Join-Path $PSScriptRoot ".claude\skills\relight\requirements.txt")
 
 Write-Host "Linking mediagen skill..."
 $mgLink = Join-Path $userSkills "mediagen"
@@ -981,6 +1119,12 @@ if (-not (Test-Path $falEnv)) {
     Copy-Item (Join-Path $PSScriptRoot "fal.env.example") $falEnv
     Write-Host "  Created $falEnv - edit it and paste your FAL_KEY (shared by all skills)."
 } else { Write-Host "  $falEnv already exists." }
+
+# Verify the editable install is importable under the SAME interpreter the scripts will use
+# (round-1 hidden assumption: multiple Pythons on Windows).
+Write-Host "Verifying falkit import..."
+python -c "import sys, falkit; print('  falkit OK under', sys.executable)"
+if ($LASTEXITCODE -ne 0) { throw "falkit is not importable under '$(python -c 'import sys;print(sys.executable)')'. Ensure scripts run under this interpreter." }
 ```
 
 - [ ] **Step 2: Create `fal.env.example`**
@@ -991,11 +1135,13 @@ if (-not (Test-Path $falEnv)) {
 FAL_KEY=
 ```
 
-- [ ] **Step 3: Update `.gitignore`** — append:
+- [ ] **Step 3: Update `.gitignore`** — append (broad egg-info + build so editable-install artifacts never get committed, round-1 blindspot):
 ```
 fal.env
 mediagen-outputs/
-falkit/falkit.egg-info/
+*.egg-info/
+falkit/build/
+__editable__.*
 ```
 
 - [ ] **Step 4: Update `README.md`** — add a "MediaGen" section: what it does (4 capabilities), that the user never names a model, the shared `~/.claude/fal.env` key, and that `install.ps1` now also installs `falkit` + links MediaGen. Note in the Claude-setup section that setup also covers MediaGen.
@@ -1024,14 +1170,38 @@ git commit -m "feat(mediagen): installer (falkit editable, mediagen link, shared
 
 ## Test Plan
 
-- **Smoke test:** `python -m pytest falkit/tests/ .claude/skills/mediagen/tests/ .claude/skills/relight/tests/ -q` → **49 passed** (9 falkit + 14 mediagen + 26 relight), no paid calls. Pass signal: all green, including the relight regression after the shim refactor.
+- **Smoke test:** `python -m pytest falkit/tests/ .claude/skills/mediagen/tests/ .claude/skills/relight/tests/ -q` → **53 passed** (9 falkit + 17 mediagen + 27 relight), no paid calls. Pass signal: all green, including the relight regression after the shim refactor (relight = 26 prior with 2 updated for shared-key precedence + 1 new shim-smoke test).
 - **Model-resolver tests:** task→endpoint for all four tasks; `tier="cheap"` differs for video; `override` wins; unknown task raises `GuidedError` listing valid tasks. This is the core of the "user never names a model" guarantee.
 - **Payload-builder tests:** each `build_request` carries the resolved endpoint's required params (prompt; edit ref-image list; video duration string + 3–15s bound; upscale factor).
 - **Cost-estimator tests:** `estimate_cost` returns expected values at known inputs (image 2K/4K; video per-second; upscale per-second by out-res), deterministic, no half-cent ambiguity.
 - **Cost-safety / approval (the money guard):** every paid script spends nothing on `--dry-run`; `image_to_video` and `upscale` refuse the real run without `approved=True`; the dry-run guards assert `subscribe`/`load_fal_key`/`upload_file` are never called.
 - **>10MB compression:** `needs_compression` true/false at the boundary (unit, no paid call); the compress path is exercised in the manual gate.
-- **Relight regression:** the existing 26 relight tests pass unchanged after `relight_common.py` becomes a falkit shim — proves the shared-core refactor didn't break the shipped skill.
+- **Relight regression:** the relight suite stays green after `relight_common.py` becomes a falkit shim — 27 tests (26 prior, with 2 `load_fal_key` tests updated to isolate `FAL_KEY`/`shared_key_path` for the new shared-key precedence, plus 1 new shim-smoke test). Proves the shared-core refactor didn't break the shipped skill. The shim's `try/except ImportError` fallback is what keeps Relight working even if `falkit` isn't installed.
 - **Abuse / edge:** missing key → `GuidedError` naming `~/.claude/fal.env`; unknown task/model → `GuidedError`; image_edit with zero references → `GuidedError`; video duration out of 3–15 → `GuidedError` before any call.
 - **AI-output quality (manual done-gate, Task 10):** one real run of each capability judged on output quality + correct cost-gating, not just HTTP 200.
 - **Known-bug regressions:** each defect from Task 10 gets a unit test.
-- **Done-gate:** full unit suite (49) green + relight regression green + cost-safety green + one human-reviewed real run of all four capabilities (with approval gates firing on video/upscale) before merging the branch.
+- **Done-gate:** full unit suite (53) green + relight regression green + cost-safety green + one human-reviewed real run of all four capabilities (with approval gates firing on video/upscale) before merging the branch.
+
+## Review log
+
+### Round 1 — 2026-06-21
+
+**Reviewer verdict:** CHANGES REQUIRED
+
+**Reviewer summary:**
+- Issue 1: Relight regression not guaranteed — after installer seeds `~/.claude/fal.env`, relight's two `load_fal_key` tests resolve the shared key first and fail; shim can't fix, and "don't touch tests" rule contradicts that.
+- Issue 2: Installing Relight alone breaks — relight scripts now import `falkit` but `relight/requirements.txt` never pulls it.
+- Issue 3: Bare `falkit` in `mediagen/requirements.txt` fails against PyPI; installer never installs mediagen's real deps.
+- Issue 4: `models.py` uses `str | None` (3.10+) but `pyproject` declares `>=3.9`.
+- Blindspots: uneven dry-run money-guards; upscale `factor` ignored in cost (2× and 4× same price); gitignore missing egg-info/build; interpreter pinning for editable install; i2v temp-name collision; image-edit cost assumed same as gen.
+
+**Accepted (all — review was accurate and well-evidenced):**
+- Issue 1 — Task 3 now updates the 2 relight `load_fal_key` tests (`delenv FAL_KEY` + patch `shared_key_path`); reworded claim to "26 pass, 2 updated"; added a shim-smoke test. Relight count 26→27.
+- Issue 2 — shim rewritten with `try/except ImportError` inline fallback so Relight degrades gracefully (still works without falkit); installer also runs relight requirements.
+- Issue 3 — dropped bare `falkit` from mediagen requirements; installer now runs `pip install -r mediagen/requirements.txt`; editable install pinned as ordered prerequisite (ffmpeg → falkit -e → mediagen reqs → relight reqs → link → seed key → verify import).
+- Issue 4 — `requires-python` bumped to `>=3.10`.
+- Blindspots — uniform `_no_spend` triple-stub helper across all four script tests; upscale gains `output_res_tier(in_min_dim, factor)` so cost scales with factor (+ factor cap at 8×, + 3 new tests); gitignore adds `*.egg-info/`, `falkit/build/`, `__editable__.*`; installer prints `sys.executable` and asserts `import falkit`; i2v compress temp filename made unique per output; SKILL.md labels edit/per-second costs approximate and probes input for upscale.
+
+**Contested:** none — the review was correct on every point. (Issue 2's fix is stronger than the reviewer's suggested "document editable install as required": the `try/except` fallback means Relight genuinely still runs standalone, not just that the requirement is documented.)
+
+**Plan body changes:** pyproject 3.10; Task 3 shim+tests rewritten (graceful fallback, 2 tests updated, 1 added); Task 4 requirements note; Task 5/6/7 uniform money-guard; Task 6 unique temp name; Task 7 factor-aware cost + cap + tests; Task 8 SKILL.md cost-approx + upscale probing; Task 9 installer order + import verify + relight reqs + gitignore; test counts 49→53 (9 falkit + 17 mediagen + 27 relight).
