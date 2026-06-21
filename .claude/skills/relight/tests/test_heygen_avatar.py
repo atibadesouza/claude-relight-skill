@@ -115,3 +115,48 @@ def test_estimate_avatar_cost_four_dollars_per_minute():
     assert ha.estimate_avatar_cost(60.0) == 4.00
     assert ha.estimate_avatar_cost(30.0) == 2.00
     assert ha.estimate_avatar_cost(54.0) == 3.60
+
+
+def test_dry_run_spends_nothing_no_approval(monkeypatch):
+    monkeypatch.setattr(ha, "probe_duration", lambda p: 54.0)
+    monkeypatch.setattr(ha, "probe_dimensions", lambda p: (1440, 1440))
+    out = ha.run("clip.mp4", "still.png", "out.mp4", dry_run=True)
+    assert out["endpoint"].endswith("/v2/video/generate")
+    assert out["est_cost"] == 3.60
+    assert out["payload"]["dimension"] == {"width": 1080, "height": 1080}
+    assert out["payload"]["use_avatar_iv_model"] is True
+
+
+def test_real_run_refuses_without_approval(monkeypatch):
+    monkeypatch.setattr(ha, "probe_duration", lambda p: 30.0)
+    monkeypatch.setattr(ha, "probe_dimensions", lambda p: (1080, 1080))
+    with pytest.raises(rc.GuidedError) as e:
+        ha.run("clip.mp4", "still.png", "out.mp4", dry_run=False, approved=False)
+    assert "approv" in str(e.value).lower()
+
+
+def test_poll_raises_on_credit_error(monkeypatch):
+    monkeypatch.setattr(hc, "get_status",
+                        lambda key, vid: {"status": "failed", "message": "Insufficient credit. This operation requires 'api' credits."})
+    with pytest.raises(rc.GuidedError) as e:
+        ha.poll_until_done("k", "vid", "out.mp4", interval=0, max_tries=1)
+    assert "credit" in str(e.value).lower()
+
+
+def test_poll_raises_on_plain_failure(monkeypatch):
+    monkeypatch.setattr(hc, "get_status",
+                        lambda key, vid: {"status": "failed", "error": "bad input"})
+    with pytest.raises(rc.GuidedError):
+        ha.poll_until_done("k", "vid", "out.mp4", interval=0, max_tries=1)
+
+
+def test_verify_nonempty_raises_on_zero_byte(tmp_path):
+    f = tmp_path / "x.mp4"; f.write_bytes(b"")
+    with pytest.raises(rc.GuidedError) as e:
+        ha._verify_nonempty(str(f), "https://recover/url")
+    assert "recover" in str(e.value).lower() or "empty" in str(e.value).lower()
+
+
+def test_verify_nonempty_ok_on_real_bytes(tmp_path):
+    f = tmp_path / "x.mp4"; f.write_bytes(b"abc")
+    ha._verify_nonempty(str(f), "https://recover/url")   # no raise
