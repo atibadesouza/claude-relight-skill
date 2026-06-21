@@ -65,3 +65,53 @@ def test_get_status_raises_guided_on_http_error(monkeypatch):
     monkeypatch.setattr(hc.requests, "get", lambda *a, **k: _R())
     with pytest.raises(rc.GuidedError):
         hc.get_status("k", "vid")
+
+
+import heygen_avatar as ha
+
+
+def test_audio_extract_cmd_makes_mp3():
+    cmd = ha.audio_extract_cmd("clip.mp4", "a.mp3")
+    assert cmd[0] == "ffmpeg"
+    assert "-vn" in cmd
+    assert "libmp3lame" in cmd
+    assert cmd[-1] == "a.mp3"
+
+
+def test_aspect_to_dimension_square_caps_to_1080():
+    assert ha.aspect_to_dimension(1440, 1440) == {"width": 1080, "height": 1080}
+
+
+def test_aspect_to_dimension_landscape_1080p():
+    assert ha.aspect_to_dimension(1920, 1080) == {"width": 1920, "height": 1080}
+
+
+def test_aspect_to_dimension_no_upscale():
+    assert ha.aspect_to_dimension(720, 720) == {"width": 720, "height": 720}
+
+
+def test_aspect_to_dimension_even_dimensions():
+    d = ha.aspect_to_dimension(1441, 1080)   # odd width in -> even out
+    assert d["width"] % 2 == 0 and d["height"] % 2 == 0
+
+
+def test_aspect_to_dimension_preserves_ratio_and_caps_short_side():
+    d = ha.aspect_to_dimension(1170, 2532)   # phone portrait, non-trivial ratio
+    assert min(d["width"], d["height"]) <= 1080            # short side capped
+    assert abs(d["width"] / d["height"] - 1170 / 2532) < 0.01   # ratio preserved
+
+
+def test_build_generate_request_shape():
+    req = ha.build_generate_request("tp123", "https://a/audio.mp3", {"width": 1080, "height": 1080}, "My Title")
+    assert req["use_avatar_iv_model"] is True
+    assert req["dimension"] == {"width": 1080, "height": 1080}
+    vi = req["video_inputs"][0]
+    assert vi["character"] == {"type": "talking_photo", "talking_photo_id": "tp123"}
+    assert vi["voice"] == {"type": "audio", "audio_url": "https://a/audio.mp3"}
+    assert req["test"] is False
+
+
+def test_estimate_avatar_cost_four_dollars_per_minute():
+    assert ha.estimate_avatar_cost(60.0) == 4.00
+    assert ha.estimate_avatar_cost(30.0) == 2.00
+    assert ha.estimate_avatar_cost(54.0) == 3.60
